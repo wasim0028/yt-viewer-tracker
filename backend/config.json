@@ -1,0 +1,18 @@
+{
+  "channels": [
+    {
+      "name": "RBANGLA",
+      "color": "#E5384B",
+      "channelId": "UCajVjEHDoVn_AHsunUZz_EQ",
+      "videoIds": [],
+      "autoDiscover": true
+    },
+    {
+      "name": "ABPANANDA",
+      "color": "#2F6FED",
+      "channelId": "UCv3rFzn-GHGtqzXiaq3sWNg",
+      "videoIds": [],
+      "autoDiscover": true
+    }
+  ]
+}

@@ -1,0 +1,81 @@
+{
+  "ads": [
+    {
+      "id": "anjali-silk",
+      "type": "image",
+      "mediaUrl": "/ads-media/anjali-silk.png",
+      "linkUrl": "",
+      "altText": "Anjali Silk"
+    },
+    {
+      "id": "floric-hotel",
+      "type": "image",
+      "mediaUrl": "/ads-media/floric-hotel.png",
+      "linkUrl": "",
+      "altText": "Floric Hotel"
+    },
+    {
+      "id": "gd-goenka-school",
+      "type": "image",
+      "mediaUrl": "/ads-media/gd-goenka-school.png",
+      "linkUrl": "",
+      "altText": "GD Goenka Public School Kolkata - Admissions Open 2026-27"
+    },
+    {
+      "id": "global-knowledge-campus",
+      "type": "image",
+      "mediaUrl": "/ads-media/global-knowledge-campus.png",
+      "linkUrl": "",
+      "altText": "Global Knowledge Campus / Krishnagar Public School - Admissions Open 2026-27"
+    },
+    {
+      "id": "iihm",
+      "type": "image",
+      "mediaUrl": "/ads-media/iihm.png",
+      "linkUrl": "",
+      "altText": "IIHM - International Institute of Hotel Management"
+    },
+    {
+      "id": "luxury-living",
+      "type": "image",
+      "mediaUrl": "/ads-media/luxury-living.png",
+      "linkUrl": "",
+      "altText": "Luxury Living Furniture"
+    },
+    {
+      "id": "national-gems-hs",
+      "type": "image",
+      "mediaUrl": "/ads-media/national-gems-hs.png",
+      "linkUrl": "https://nghss.org",
+      "altText": "National Gems H.S. School, Kolkata"
+    },
+    {
+      "id": "sankardar-koaching",
+      "type": "image",
+      "mediaUrl": "/ads-media/sankardar-koaching.png",
+      "linkUrl": "",
+      "altText": "Sankardar Vivekananda Academy - Government Job Coaching"
+    },
+    {
+      "id": "scabigon",
+      "type": "image",
+      "mediaUrl": "/ads-media/scabigon.png",
+      "linkUrl": "",
+      "altText": "Scabigon Ayurvedic Products"
+    },
+    {
+      "id": "supreme-knowledge-foundation",
+      "type": "image",
+      "mediaUrl": "/ads-media/supreme-knowledge-foundation.png",
+      "linkUrl": "https://skf.edu.in",
+      "altText": "Supreme Knowledge Foundation"
+    },
+    {
+      "id": "ventair",
+      "type": "image",
+      "mediaUrl": "/ads-media/ventair.png",
+      "linkUrl": "",
+      "altText": "Ventair Kitchen Chimneys"
+    }
+  ]
+}
