@@ -1,0 +1,40 @@
+# This is EKS Fargate's own built-in logging mechanism, not a CloudWatch
+# agent DaemonSet (which cannot run on Fargate at all - no host access).
+# AWS automatically injects a Fluent Bit sidecar into every Fargate pod in
+# this cluster and configures it from this ConfigMap - nothing else needed.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: aws-observability
+  labels:
+    aws-observability: enabled
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: aws-logging
+  namespace: aws-observability
+data:
+  flb_log_cw: "false" # Fluent Bit's own internal debug logs - keep off, or every pod's sidecar spams CloudWatch about itself
+  filters.conf: |
+    [FILTER]
+        Name parser
+        Match *
+        Key_name log
+        Parser crio
+        Reserve_Data On
+  output.conf: |
+    [OUTPUT]
+        Name cloudwatch_logs
+        Match *
+        region ap-south-1
+        log_group_name /aws/eks/yt-viewer-tracker-production/fargate
+        log_stream_prefix fargate-
+        auto_create_group true
+  parsers.conf: |
+    [PARSER]
+        Name crio
+        Format Regex
+        Regex ^(?<time>[^ ]+) (?<stream>stdout|stderr) (?<logtag>P|F) (?<log>.*)$
+        Time_Key    time
+        Time_Format %Y-%m-%dT%H:%M:%S.%L%z

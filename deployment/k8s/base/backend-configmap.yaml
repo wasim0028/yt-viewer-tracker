@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: backend-config
+  namespace: yt-viewer-tracker
+data:
+  NODE_ENV: "production"
+  PORT: "4000"
+  PGSSL: "true"
+  POLL_INTERVAL_MS: "180000"
+  LIVE_LOOKUP_REFRESH_MS: "3600000"
+  REACTIVE_REDISCOVER_COOLDOWN_MS: "1800000"
+  # Not secret (just an endpoint URL) - the actual API key for it lives in
+  # the api-keys Secrets Manager secret alongside YOUTUBE_API_KEY. Leave
+  # this blank to keep using the app's built-in local ads.json fallback,
+  # exactly like the app already does when ADS_API_URL is unset.
+  ADS_API_URL: ""

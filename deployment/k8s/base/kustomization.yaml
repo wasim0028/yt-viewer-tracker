@@ -1,0 +1,31 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespace.yaml
+  - external-secrets-sa.yaml
+  - cluster-secret-store.yaml
+  - external-secret.yaml
+  - backend-configmap.yaml
+  - backend-deployment.yaml
+  - backend-service.yaml
+  - frontend-deployment.yaml
+  - frontend-service.yaml
+  - ingress.yaml
+  - aws-logging-configmap.yaml
+  - adot-collector.yaml
+
+# GitHub Actions rewrites these after each build, via:
+#   kustomize edit set image backend-image=<ecr-url>:<tag> frontend-image=<ecr-url>:<tag>
+# That commit is what ArgoCD actually reacts to. "backend-image" /
+# "frontend-image" below must exactly match the placeholder `image:` values
+# in backend-deployment.yaml / frontend-deployment.yaml, or kustomize
+# silently matches nothing and rewrites nothing - confirmed by actually
+# running `kustomize build` against this during development.
+images:
+  - name: backend-image
+    newName: REPLACE_WITH_ECR_BACKEND_URL
+    newTag: latest
+  - name: frontend-image
+    newName: REPLACE_WITH_ECR_FRONTEND_URL
+    newTag: latest

@@ -1,0 +1,85 @@
+# ADOT (AWS Distro for OpenTelemetry) Collector - scrapes the backend's
+# /metrics endpoint and remote-writes into Amazon Managed Service for
+# Prometheus. A plain Deployment, not a DaemonSet, so it's Fargate-
+# compatible - the closest equivalent to a Prometheus "ServiceMonitor" that
+# works without the Prometheus Operator (which this cluster doesn't run,
+# since its own components have the same Fargate incompatibilities this
+# whole setup exists to avoid).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: adot-collector
+  namespace: yt-viewer-tracker
+  annotations:
+    eks.amazonaws.com/role-arn: "REPLACE_WITH_TERRAFORM_OUTPUT_adot_collector_role_arn"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: adot-collector-config
+  namespace: yt-viewer-tracker
+data:
+  collector.yaml: |
+    receivers:
+      prometheus:
+        config:
+          scrape_configs:
+            - job_name: 'backend'
+              scrape_interval: 30s
+              static_configs:
+                - targets: ['backend.yt-viewer-tracker.svc.cluster.local:4000']
+              metrics_path: /metrics
+
+    extensions:
+      # Signs requests with the pod's IAM role (IRSA) so Managed Prometheus accepts them.
+      sigv4auth:
+        region: ap-south-1
+        service: aps
+
+    exporters:
+      prometheusremotewrite:
+        endpoint: "REPLACE_WITH_TERRAFORM_OUTPUT_amp_workspace_endpoint_api_v1_remote_write"
+        auth:
+          authenticator: sigv4auth
+
+    service:
+      extensions: [sigv4auth]
+      pipelines:
+        metrics:
+          receivers: [prometheus]
+          exporters: [prometheusremotewrite]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: adot-collector
+  namespace: yt-viewer-tracker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: adot-collector
+  template:
+    metadata:
+      labels:
+        app: adot-collector
+    spec:
+      serviceAccountName: adot-collector
+      containers:
+        - name: adot-collector
+          image: public.ecr.aws/aws-observability/aws-otel-collector:v0.43.3 # pinned: :latest changed config format once already
+          args: ["--config=/conf/collector.yaml"]
+          volumeMounts:
+            - name: config
+              mountPath: /conf
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+      volumes:
+        - name: config
+          configMap:
+            name: adot-collector-config

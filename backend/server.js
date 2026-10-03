@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { initDb, getSince, getRange, getRangeBucketed, pivot } from './db.js';
 import { startPolling } from './poller.js';
 import { getAds } from './ads.js';
+import client from 'prom-client';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -36,6 +37,20 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 app.use('/ads-media', express.static(path.join(__dirname, 'public', 'ads')));
+
+// Liveness/readiness target for Docker HEALTHCHECK and Kubernetes probes.
+// Deliberately no DB call: a brief RDS hiccup shouldn't make Kubernetes
+// kill and restart an otherwise healthy process.
+app.get('/healthz', (req, res) => {
+  res.status(200).json({ status: 'ok' });
+});
+
+// Prometheus scrape target for the ADOT Collector (k8s adot-collector.yaml).
+client.collectDefaultMetrics();
+app.get('/metrics', async (req, res) => {
+  res.set('Content-Type', client.register.contentType);
+  res.end(await client.register.metrics());
+});
 
 app.get('/api/channels', (req, res) => {
   res.json(channels.map(({ name, color }) => ({ name, color })));
