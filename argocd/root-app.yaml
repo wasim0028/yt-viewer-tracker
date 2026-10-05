@@ -1,0 +1,30 @@
+# argocd/root-app.yaml
+#
+# The only Application you ever apply by hand (deploy.sh argocd does it).
+# It watches argocd/apps/ and manages every other Application from there:
+# the "app of apps" pattern. Adding a service or environment later means
+# adding a YAML file to argocd/apps/ and committing, not running kubectl.
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: yt-viewer-tracker-root
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io   # deleting this deletes the child apps too
+spec:
+  project: default
+
+  source:
+    repoURL: https://github.com/wasim0028/yt-viewer-tracker.git
+    targetRevision: main
+    path: argocd/apps
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+
+  syncPolicy:
+    automated:
+      prune: true      # remove Applications deleted from git
+      selfHeal: true   # undo manual edits

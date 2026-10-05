@@ -1,3 +1,9 @@
 node_modules/
 dist/
 .env
+
+# Terraform state contains passwords and API keys
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log

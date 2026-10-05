@@ -1,0 +1,31 @@
+name: yt-viewer-tracker
+
+services:
+  # Must be named "backend": nginx.conf proxies /api and /ads-media to http://backend:4000
+  backend:
+    build:
+      context: ../..
+      dockerfile: deployment/docker/Dockerfile.backend
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: "4000"
+      DATABASE_URL: ${DATABASE_URL:?Export DATABASE_URL, e.g. postgres://user:pass@your-rds-endpoint:5432/dbname}
+      PGSSL: ${PGSSL:-true} # RDS expects SSL
+      YOUTUBE_API_KEY: ${YOUTUBE_API_KEY:?Export YOUTUBE_API_KEY}
+      POLL_INTERVAL_MS: ${POLL_INTERVAL_MS:-180000}
+      LIVE_LOOKUP_REFRESH_MS: ${LIVE_LOOKUP_REFRESH_MS:-3600000}
+      REACTIVE_REDISCOVER_COOLDOWN_MS: ${REACTIVE_REDISCOVER_COOLDOWN_MS:-1800000}
+      ADS_API_URL: ${ADS_API_URL:-}
+      ADS_API_KEY: ${ADS_API_KEY:-}
+
+  frontend:
+    build:
+      context: ../..
+      dockerfile: deployment/docker/Dockerfile.frontend
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    depends_on:
+      backend:
+        condition: service_healthy # waits for the backend's /healthz check

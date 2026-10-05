@@ -1,0 +1,28 @@
+# Requires the AWS Load Balancer Controller installed on the cluster first
+# (a one-time `helm install` during cluster bootstrap - see README). Without
+# it, this Ingress resource just sits there with no address ever assigned.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: yt-viewer-tracker
+  namespace: yt-viewer-tracker
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}]'
+    # Once you have a real domain + ACM certificate, add:
+    # alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:...
+    # alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS": 443}]'
+    # alb.ingress.kubernetes.io/ssl-redirect: '443'
+spec:
+  ingressClassName: alb
+  rules:
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend
+                port:
+                  number: 8080

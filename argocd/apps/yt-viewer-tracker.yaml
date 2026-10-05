@@ -1,0 +1,36 @@
+# argocd/apps/yt-viewer-tracker.yaml
+#
+# The application itself: everything in deployment/k8s/base.
+# Managed by root-app.yaml; don't kubectl apply this file directly.
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: yt-viewer-tracker
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io   # deleting this app deletes its pods, Ingress (and so the ALB), etc.
+spec:
+  project: default
+
+  source:
+    repoURL: https://github.com/wasim0028/yt-viewer-tracker.git
+    targetRevision: main
+    path: deployment/k8s/base
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: yt-viewer-tracker
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false   # namespace.yaml creates it
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m

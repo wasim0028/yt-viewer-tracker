@@ -1,0 +1,52 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: yt-viewer-tracker
+spec:
+  replicas: 1
+  # IMPORTANT: this MUST stay at 1. The poller's reactive-rediscovery cache
+  # (backend/poller.js) lives in each process's own memory - running more
+  # than one replica means multiple independent pollers all hitting the
+  # YouTube API on their own schedules, multiplying your quota usage by the
+  # replica count and writing duplicate ticks to the database. If the API
+  # side ever needs to scale independently of the poller, that's a real
+  # code split (separate poller process from the HTTP server), not just a
+  # replica count change.
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+    spec:
+      containers:
+        - name: backend
+          image: backend-image # kustomize rewrites this to the real ECR image:tag - see kustomization.yaml
+          ports:
+            - containerPort: 4000
+          envFrom:
+            - configMapRef:
+                name: backend-config
+            - secretRef:
+                name: backend-secrets # created by the ExternalSecret, not committed here
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 4000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 4000
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi

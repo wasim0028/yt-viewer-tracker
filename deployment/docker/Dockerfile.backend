@@ -1,0 +1,29 @@
+FROM node:22-alpine AS builder
+
+WORKDIR /src
+
+COPY backend/package.json backend/package-lock.json* ./
+
+RUN --mount=type=cache,id=yt-viewer-tracker,target=/root/.npm npm ci --silent --cache /root/.npm
+
+COPY backend/. .
+
+FROM node:22-alpine
+
+WORKDIR /app
+
+ENV NODE_ENV=production
+
+COPY --from=builder --chown=node:node /src /app
+
+USER node
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+  CMD ["node", "-e", "require('http').get('http://localhost:4000/healthz', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"]
+
+EXPOSE 4000
+
+CMD ["node","server.js"]
+
+
+
