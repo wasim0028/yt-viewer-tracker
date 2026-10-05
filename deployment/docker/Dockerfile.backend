@@ -1,29 +1,35 @@
-FROM node:22-alpine AS builder
+# Stage 1. Build the backend application
+FROM node:22-alpine AS backend-builder
 
 WORKDIR /src
 
 COPY backend/package.json backend/package-lock.json* ./
 
-RUN --mount=type=cache,id=yt-viewer-tracker,target=/root/.npm npm ci --silent --cache /root/.npm
+RUN --mount=type=cache,id=yt-viewer-tracker-npm,target=/root/.npm \
+    npm ci --omit=dev --silent --cache /root/.npm
 
 COPY backend/. .
 
+# Stage 2. Final runtime image
 FROM node:22-alpine
 
 WORKDIR /app
-
 ENV NODE_ENV=production
 
-COPY --from=builder --chown=node:node /src /app
+# No separate "build" step exists for this backend - plain ESM JavaScript,
+# no bundler/compiler - so what the builder stage produced (deps + source)
+# IS the finished app. --chown ensures the non-root user below actually
+# owns these files.
+COPY --from=backend-builder --chown=node:node /src /app
 
 USER node
 
+# Uses Node itself (always present) rather than nc/wget/curl, which aren't
+# guaranteed to exist in this image - hits the dedicated /healthz route
+# added to server.js specifically for this.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
   CMD ["node", "-e", "require('http').get('http://localhost:4000/healthz', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"]
 
 EXPOSE 4000
 
-CMD ["node","server.js"]
-
-
-
+CMD ["node", "server.js"]
