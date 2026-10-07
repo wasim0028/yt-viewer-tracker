@@ -38,6 +38,18 @@ app.use(cors());
 app.use(express.json());
 app.use('/ads-media', express.static(path.join(__dirname, 'public', 'ads')));
 
+// Health check for the Docker HEALTHCHECK and Kubernetes probes.
+app.get('/healthz', (req, res) => {
+  res.status(200).json({ status: 'ok' });
+});
+
+// Prometheus metrics, scraped by the ADOT collector.
+client.collectDefaultMetrics();
+app.get('/metrics', async (req, res) => {
+  res.set('Content-Type', client.register.contentType);
+  res.end(await client.register.metrics());
+});
+
 app.get('/api/channels', (req, res) => {
   res.json(channels.map(({ name, color }) => ({ name, color })));
 });
