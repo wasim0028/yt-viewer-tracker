@@ -17,7 +17,7 @@ spec:
 
   source:
     repoURL: https://github.com/wasim0028/yt-viewer-tracker.git
-    targetRevision: main
+    targetRevision: devops
     path: argocd/apps
 
   destination:

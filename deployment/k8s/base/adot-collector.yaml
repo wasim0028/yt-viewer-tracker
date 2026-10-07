@@ -11,7 +11,7 @@ metadata:
   name: adot-collector
   namespace: yt-viewer-tracker
   annotations:
-    eks.amazonaws.com/role-arn: "REPLACE_WITH_TERRAFORM_OUTPUT_adot_collector_role_arn"
+    eks.amazonaws.com/role-arn: "arn:aws:iam::326334468168:role/yt-viewer-tracker-adot-collector"
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -38,7 +38,7 @@ data:
 
     exporters:
       prometheusremotewrite:
-        endpoint: "REPLACE_WITH_TERRAFORM_OUTPUT_amp_workspace_endpoint_api_v1_remote_write"
+        endpoint: "https://aps-workspaces.ap-south-1.amazonaws.com/workspaces/ws-0ccca591-919d-47ca-8a09-5cdbf3000dc9/api/v1/remote_write"
         auth:
           authenticator: sigv4auth
 
