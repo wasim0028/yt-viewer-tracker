@@ -2,18 +2,18 @@ apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
 resources:
-  - namespace.yaml
-  - external-secrets-sa.yaml
-  - cluster-secret-store.yaml
-  - external-secret.yaml
-  - backend-configmap.yaml
-  - backend-deployment.yaml
-  - backend-service.yaml
-  - frontend-deployment.yaml
-  - frontend-service.yaml
-  - ingress.yaml
-  - aws-logging-configmap.yaml
-  - adot-collector.yaml
+- namespace.yaml
+- external-secrets-sa.yaml
+- cluster-secret-store.yaml
+- external-secret.yaml
+- backend-configmap.yaml
+- backend-deployment.yaml
+- backend-service.yaml
+- frontend-deployment.yaml
+- frontend-service.yaml
+- ingress.yaml
+- aws-logging-configmap.yaml
+- adot-collector.yaml
 
 # GitHub Actions rewrites these after each build, via:
 #   kustomize edit set image backend-image=<ecr-url>:<tag> frontend-image=<ecr-url>:<tag>
@@ -23,9 +23,9 @@ resources:
 # silently matches nothing and rewrites nothing - confirmed by actually
 # running `kustomize build` against this during development.
 images:
-  - name: backend-image
-    newName: REPLACE_WITH_ECR_BACKEND_URL
-    newTag: latest
-  - name: frontend-image
-    newName: REPLACE_WITH_ECR_FRONTEND_URL
-    newTag: latest
+- name: backend-image
+  newName: 326334468168.dkr.ecr.ap-south-1.amazonaws.com/yt-viewer-tracker-backend
+  newTag: ff88a6d5820d
+- name: frontend-image
+  newName: 326334468168.dkr.ecr.ap-south-1.amazonaws.com/yt-viewer-tracker-frontend
+  newTag: ff88a6d5820d
