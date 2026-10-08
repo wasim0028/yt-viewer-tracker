@@ -1,0 +1,81 @@
+# CI/CD: push code to the deploy branch and it goes live.
+#   build images -> push to ECR -> commit the new tag -> ArgoCD rolls it out.
+# Does nothing (and does not fail) if the cluster isn't deployed yet.
+name: Release
+
+on:
+  push:
+    branches: [devops]
+    paths:
+      - "backend/**"
+      - "frontend/**"
+      - "deployment/docker/**"
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ap-south-1
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Is the cluster deployed?
+        id: cluster
+        run: |
+          if aws eks describe-cluster --name yt-viewer-tracker >/dev/null 2>&1; then
+            echo "up=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "up=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No cluster yet. Run the 'Deploy infrastructure' workflow first. Nothing released."
+          fi
+
+      - uses: hashicorp/setup-terraform@v3
+        if: steps.cluster.outputs.up == 'true'
+        with:
+          terraform_version: 1.9.8
+          terraform_wrapper: false
+
+      - name: Install kustomize if the runner lacks it
+        if: steps.cluster.outputs.up == 'true'
+        run: |
+          if ! command -v kustomize >/dev/null; then
+            curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
+            sudo mv kustomize /usr/local/bin/
+          fi
+
+      - name: Build and push images
+        if: steps.cluster.outputs.up == 'true'
+        run: |
+          ./deployment/scripts/deploy.sh init
+          ./deployment/scripts/deploy.sh build
+          ./deployment/scripts/deploy.sh push
+
+      - name: Commit the new image tag (ArgoCD deploys what is in git)
+        if: steps.cluster.outputs.up == 'true'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add deployment/k8s/base
+          git diff --cached --quiet && { echo "Tag unchanged"; exit 0; }
+          git commit -m "ci: deploy image $(git rev-parse --short=12 HEAD) [skip ci]"
+          git pull --rebase origin "${GITHUB_REF_NAME}"
+          git push origin "HEAD:${GITHUB_REF_NAME}"

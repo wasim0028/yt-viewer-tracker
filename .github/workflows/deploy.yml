@@ -1,0 +1,103 @@
+# One-click deploy: Actions tab -> "Deploy infrastructure" -> Run workflow.
+# Builds the whole environment (VPC, EKS, RDS, add-ons, images, ArgoCD).
+# Needs the one-time setup in deployment/scripts/bootstrap.sh.
+name: Deploy infrastructure
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write   # OIDC login to AWS, no stored keys
+  contents: write   # commit the image tag and AWS identifiers back to the branch
+
+concurrency:
+  group: infrastructure
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ap-south-1
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-duration-seconds: 10800
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.8
+          terraform_wrapper: false
+      - uses: azure/setup-kubectl@v4
+      - uses: azure/setup-helm@v4
+
+      - name: Install kustomize if the runner lacks it
+        run: |
+          if ! command -v kustomize >/dev/null; then
+            curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
+            sudo mv kustomize /usr/local/bin/
+          fi
+
+      - name: Free secret names left over from a previous destroy
+        run: ./deployment/scripts/deploy.sh free-secrets
+
+      - name: Terraform apply (VPC, EKS, RDS, ECR, secrets, IAM)
+        env:
+          AUTO_APPROVE: "1"
+          TF_VAR_db_password: ${{ secrets.DB_PASSWORD }}
+        run: ./deployment/scripts/deploy.sh apply
+
+      - name: Cluster add-ons (CoreDNS, External Secrets, Load Balancer Controller, ArgoCD)
+        run: ./deployment/scripts/deploy.sh addons
+
+      - name: Save the YouTube API key to Secrets Manager
+        env:
+          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+        run: ./deployment/scripts/deploy.sh secrets
+
+      - name: Write AWS identifiers into the manifests
+        env:
+          SKIP_GH_VARS: "1"
+        run: ./deployment/scripts/deploy.sh configure
+
+      - name: Commit manifests (image tags come from this commit)
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add deployment/k8s/base
+          git diff --cached --quiet || git commit -m "ci: set AWS identifiers [skip ci]"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+
+      - name: Build and push images
+        run: |
+          ./deployment/scripts/deploy.sh build
+          ./deployment/scripts/deploy.sh push
+
+      - name: Commit the new image tag
+        run: |
+          git add deployment/k8s/base
+          git diff --cached --quiet || git commit -m "ci: deploy image $(git rev-parse --short=12 HEAD) [skip ci]"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+
+      - name: Register the app with ArgoCD
+        run: ./deployment/scripts/deploy.sh argocd
+
+      - name: Wait for the site and print its URL
+        run: |
+          for i in $(seq 1 40); do
+            host="$(kubectl get ingress -n yt-viewer-tracker -o jsonpath='{.items[0].status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)"
+            [ -n "$host" ] && break
+            sleep 15
+          done
+          ./deployment/scripts/deploy.sh status || true
+          echo "### Deployed :rocket:" >> "$GITHUB_STEP_SUMMARY"
+          echo "http://${host:-<load balancer still provisioning; run deploy.sh status>}" >> "$GITHUB_STEP_SUMMARY"

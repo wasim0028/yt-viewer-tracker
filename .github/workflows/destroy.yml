@@ -1,0 +1,63 @@
+# One-click teardown: Actions tab -> "Destroy infrastructure" -> Run workflow,
+# then type "destroy" in the box. Deletes EKS, RDS, the load balancer, etc.
+# The state bucket and the CI role (from bootstrap.sh) are NOT deleted.
+name: Destroy infrastructure
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "destroy" to confirm'
+        required: true
+        type: string
+      delete_final_snapshot:
+        description: "Also delete the final RDS snapshot (you lose the last copy of the data)"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: infrastructure
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ap-south-1
+
+jobs:
+  destroy:
+    if: ${{ inputs.confirm == 'destroy' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-duration-seconds: 10800
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.8
+          terraform_wrapper: false
+      - uses: azure/setup-kubectl@v4
+
+      - name: Destroy (load balancer first, then ECR images, then Terraform)
+        env:
+          CONFIRM_DESTROY: destroy
+        run: ./deployment/scripts/deploy.sh destroy
+
+      - name: Release secret names so the next deploy works at once
+        run: ./deployment/scripts/deploy.sh free-secrets
+
+      - name: Delete the final RDS snapshot (only if you ticked the box)
+        if: ${{ inputs.delete_final_snapshot }}
+        run: |
+          aws rds delete-db-snapshot --db-snapshot-identifier yt-viewer-tracker-db-final-snapshot \
+            || echo "No such snapshot (already gone)"
