@@ -25,7 +25,7 @@ resources:
 images:
 - name: backend-image
   newName: 326334468168.dkr.ecr.ap-south-1.amazonaws.com/yt-viewer-tracker-backend
-  newTag: 2b14999cd36f
+  newTag: e4807a6863cc
 - name: frontend-image
   newName: 326334468168.dkr.ecr.ap-south-1.amazonaws.com/yt-viewer-tracker-frontend
-  newTag: 2b14999cd36f
+  newTag: e4807a6863cc
