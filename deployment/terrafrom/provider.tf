@@ -2,6 +2,13 @@ terraform {
 
     required_version = "~> 1.6"
 
+    # State lives in S3 so CI runners (which are wiped after every run) and
+    # your own machine share one source of truth. The bucket, lock table and
+    # the role CI uses are created once by deployment/scripts/bootstrap.sh,
+    # OUTSIDE this stack, so a destroy never deletes its own state.
+    # Bucket, key, region and lock table are passed by 'deploy.sh init'.
+    backend "s3" {}
+
     required_providers {
         aws = {
                 source = "hashicorp/aws"
@@ -33,36 +40,3 @@ provider "aws" {
         }
     }
 }
-
-resource "aws_s3_bucket" "terraform-state" {
-    bucket = "${local.name}-${local.account_id}"
-    force_destroy = false
-}
-
-resource "aws_s3_bucket_versioning" "state_versioning" {
-    bucket = aws_s3_bucket.terraform-state.id
-    versioning_configuration {
-        status = "Enabled"
-    }
-}
-
-resource "aws_s3_bucket_public_access_block" "state_privacy" {
-    bucket = aws_s3_bucket.terraform-state.id
-
-    block_public_acls = true
-    block_public_policy = true
-    ignore_public_acls = true
-    restrict_public_buckets = true
-}
-
-resource "aws_dynamodb_table" "terraform_locks" {
-    name = "mystate_table"
-    billing_mode = "PAY_PER_REQUEST"
-    hash_key = "LockID"
-
-    attribute {
-        name = "LockID"
-        type = "S"
-    }
-}
-
