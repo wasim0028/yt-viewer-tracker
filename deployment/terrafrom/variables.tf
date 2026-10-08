@@ -57,7 +57,7 @@ variable "db_multi_az" {
 
 variable "eks_cluster_version" {
   type    = string
-  default = "1.30"
+  default = "1.35"
 }
 
 variable "app_namespace" {
