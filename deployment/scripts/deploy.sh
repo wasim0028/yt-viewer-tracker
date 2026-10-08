@@ -19,11 +19,17 @@
 #   argocd       Apply argocd/root-app.yaml (app of apps)
 #   status       ArgoCD apps, pods, secrets, and the site URL
 #   destroy      Delete the load balancer first, empty ECR, then terraform destroy
+#   free-secrets Release Secrets Manager names still 'scheduled for deletion'
+#
+# One-time setup (state bucket + GitHub Actions role): scripts/bootstrap.sh
 #
 # Environment variables
 #   AUTO_APPROVE=1          Skip Terraform's "yes" prompt on apply
 #   TF_VAR_db_password=...  Your own RDS password (optional; generated if unset)
 #   YOUTUBE_API_KEY=...     Skip the key prompt in 'secrets'
+#   CONFIRM_DESTROY=destroy Skip the typed confirmation in 'destroy' (CI)
+#   SKIP_GH_VARS=1          'configure' won't try to set GitHub variables (CI)
+#   TF_STATE_BUCKET=...     Override the state bucket (default: yt-viewer-tracker-tfstate-<account id>)
 
 set -euo pipefail
 IFS=$'\n\t'
@@ -33,6 +39,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 TF_DIR="$REPO_ROOT/deployment/terrafrom"
 K8S_DIR="$REPO_ROOT/deployment/k8s/base"
 APP_NAMESPACE="${APP_NAMESPACE:-yt-viewer-tracker}"
+APP_NAME="${APP_NAME:-yt-viewer-tracker}"
 
 GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; CYAN='\033[0;36m'; NC='\033[0m'
 log()     { printf '%b[%s] ✓ %s%b\n' "$GREEN" "$(date +%H:%M:%S)" "$1" "$NC"; }
@@ -66,8 +73,18 @@ tf_init() {
   require aws terraform
   section "Terraform init"
   aws sts get-caller-identity >/dev/null 2>&1 || error "AWS CLI isn't signed in. Run 'aws configure' first."
-  # provider.tf has no backend block, so state is kept locally in deployment/terrafrom.
-  terraform -chdir="$TF_DIR" init -input=false
+  local account bucket
+  account="$(aws sts get-caller-identity --query Account --output text)"
+  bucket="${TF_STATE_BUCKET:-${APP_NAME}-tfstate-${account}}"
+  aws s3api head-bucket --bucket "$bucket" >/dev/null 2>&1 \
+    || error "State bucket '$bucket' not found. Run ./deployment/scripts/bootstrap.sh once first."
+  # State lives in S3 (see provider.tf), shared by your machine and GitHub Actions.
+  terraform -chdir="$TF_DIR" init -input=false -reconfigure \
+    -backend-config="bucket=$bucket" \
+    -backend-config="key=${APP_NAME}/terraform.tfstate" \
+    -backend-config="region=$AWS_REGION" \
+    -backend-config="dynamodb_table=${APP_NAME}-tf-locks" \
+    -backend-config="encrypt=true"
 }
 
 tf_plan() {
@@ -119,7 +136,7 @@ install_addons() {
   helm repo add eks https://aws.github.io/eks-charts --force-update >/dev/null
 
   helm upgrade --install external-secrets external-secrets/external-secrets \
-    -n external-secrets --create-namespace --wait --timeout 10m
+    -n external-secrets --create-namespace --set webhook.port=9443 --wait --timeout 10m
   log "External Secrets Operator installed"
 
   helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller \
@@ -191,7 +208,9 @@ configure_manifests() {
     "$(tf_out tf_state_bucket)"
   )
   local i
-  if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+  if [[ "${SKIP_GH_VARS:-}" == "1" ]]; then
+    log "Skipping GitHub variables (SKIP_GH_VARS=1)"
+  elif command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
     for i in "${!names[@]}"; do
       (cd "$REPO_ROOT" && gh variable set "${names[$i]}" --body "${values[$i]}" >/dev/null)
     done
@@ -246,7 +265,7 @@ push_images() {
 
   (cd "$K8S_DIR" && kustomize edit set image "backend-image=$backend:$tag" "frontend-image=$frontend:$tag")
   log "kustomization.yaml now points at tag $tag"
-  warn "Commit and push deployment/k8s/base/kustomization.yaml to main. ArgoCD deploys what's in git."
+  warn "Commit and push deployment/k8s/base/kustomization.yaml to your deploy branch (devops). ArgoCD deploys what's in git."
 }
 
 # ---------------------------------------------------------------------------
@@ -317,14 +336,34 @@ pre_destroy_cleanup() {
 tf_destroy() {
   require aws terraform kubectl
   warn "This deletes the EKS cluster, the database (a final snapshot is kept), and everything else this Terraform created."
-  local answer
-  read -rp "Type 'destroy' to continue: " answer
+  local answer="${CONFIRM_DESTROY:-}"
+  if [[ -z "$answer" ]]; then
+    read -rp "Type 'destroy' to continue: " answer
+  fi
   [[ "$answer" == "destroy" ]] || error "Cancelled."
   tf_init
   pre_destroy_cleanup
   section "Terraform destroy"
   terraform -chdir="$TF_DIR" destroy -input=false -auto-approve
   log "Destroyed. Secrets Manager keeps the deleted secrets for 7 days; redeploying sooner fails until you restore them."
+}
+
+# Secrets Manager keeps deleted secrets for 7 days and refuses to create a
+# secret with the same name meanwhile. Restore + force-delete frees the name.
+free_secrets() {
+  require aws
+  section "Freeing secret names scheduled for deletion"
+  local name deleted
+  for name in "${APP_NAME}/database-url" "${APP_NAME}/api-keys"; do
+    deleted="$(aws secretsmanager describe-secret --secret-id "$name" --query DeletedDate --output text 2>/dev/null || echo NONE)"
+    if [[ "$deleted" == "NONE" || "$deleted" == "None" ]]; then
+      log "$name: nothing to do"
+    else
+      aws secretsmanager restore-secret --secret-id "$name" >/dev/null
+      aws secretsmanager delete-secret --secret-id "$name" --force-delete-without-recovery >/dev/null
+      log "$name: released"
+    fi
+  done
 }
 
 # ---------------------------------------------------------------------------
@@ -343,7 +382,7 @@ ArgoCD deploys what's in git, so commit what this run changed:
 
   git add deployment/k8s/base
   git commit -m "Configure AWS identifiers and first image tags"
-  git push origin main
+  git push origin devops
 
 Then follow progress with:  ./deployment/scripts/deploy.sh status
 EOF
@@ -364,6 +403,7 @@ case "${1:-}" in
   argocd)      argocd_apply ;;
   status)      status ;;
   destroy)     tf_destroy ;;
+  free-secrets) free_secrets ;;
   ""|-h|--help|help) usage ;;
   *) usage; error "Unknown command: $1" ;;
 esac
