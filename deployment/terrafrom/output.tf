@@ -55,5 +55,5 @@ output "amp_workspace_endpoint" {
 }
 
 output "tf_state_bucket" {
-  value = aws_s3_bucket.terraform-state.bucket
+  value = "${local.name}-tfstate-${local.account_id}" # created by scripts/bootstrap.sh
 }
