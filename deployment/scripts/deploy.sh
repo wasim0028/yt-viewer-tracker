@@ -114,15 +114,19 @@ setup_kubectl() {
 }
 
 patch_coredns() {
-  # On a cluster with no EC2 nodes, CoreDNS is created pinned to EC2 and can
-  # never start. Removing that annotation lets it run on Fargate.
-  if kubectl get deployment coredns -n kube-system \
-      -o jsonpath='{.spec.template.metadata.annotations.eks\.amazonaws\.com/compute-type}' 2>/dev/null | grep -q ec2; then
-    kubectl patch deployment coredns -n kube-system --type json \
-      -p '[{"op": "remove", "path": "/spec/template/metadata/annotations/eks.amazonaws.com~1compute-type"}]'
+  # EKS creates CoreDNS before the Fargate profile exists, so its pods are left
+  # Pending and never start. Mark the deployment for Fargate and restart it so
+  # the pods are scheduled again. Skipped when CoreDNS is already healthy.
+  local ready desired
+  ready="$(kubectl get deployment coredns -n kube-system -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)"
+  desired="$(kubectl get deployment coredns -n kube-system -o jsonpath='{.spec.replicas}' 2>/dev/null || true)"
+  if [[ "${ready:-0}" != "${desired:-2}" ]]; then
+    warn "CoreDNS not ready (${ready:-0}/${desired:-2}); moving it to Fargate and restarting"
+    kubectl patch deployment coredns -n kube-system --type merge \
+      -p '{"spec":{"template":{"metadata":{"annotations":{"eks.amazonaws.com/compute-type":"fargate"}}}}}'
     kubectl rollout restart deployment coredns -n kube-system
   fi
-  kubectl rollout status deployment coredns -n kube-system --timeout=300s
+  kubectl rollout status deployment coredns -n kube-system --timeout=600s
   log "CoreDNS running on Fargate"
 }
 
@@ -331,6 +335,14 @@ pre_destroy_cleanup() {
       log "Emptied $repo"
     fi
   done
+
+  # The database keeps a final snapshot with a fixed name. One left over from an
+  # earlier destroy would make RDS refuse to create the new one, so replace it.
+  local snap="${APP_NAME}-db-final-snapshot"
+  if aws rds describe-db-snapshots --db-snapshot-identifier "$snap" >/dev/null 2>&1; then
+    aws rds delete-db-snapshot --db-snapshot-identifier "$snap" >/dev/null
+    warn "Replaced the older final snapshot $snap; a fresh one is taken during destroy"
+  fi
 }
 
 tf_destroy() {
