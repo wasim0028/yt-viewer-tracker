@@ -6,28 +6,23 @@
 
 ## About
 
-Viewer Watch is a full-stack dashboard that compares the live audience of
-YouTube channels head-to-head. Every few minutes it asks the YouTube Data API
-how many people are watching each channel's live streams, adds up the viewers
-across all of a channel's simultaneous broadcasts, and stores each reading in
-PostgreSQL. The web UI shows the comparison as a live chart, a reading log, and
-a searchable history.
+Viewer Watch compares the live audience of YouTube channels head-to-head.
+Every 3 minutes it asks the YouTube Data API how many people are watching
+each live stream a channel is running, adds them up per channel, and stores
+the reading in PostgreSQL. The dashboard shows a live chart, a reading log,
+and history for any date range.
 
-It ships with a production deployment on AWS: Terraform builds the
-infrastructure, GitHub Actions builds and tests every push, and ArgoCD keeps the
-Kubernetes cluster in sync with Git (GitOps).
+**Features**
 
-### Features
+- Live comparison chart, refreshed every 30 seconds (1H / 6H / 24H / 3D windows)
+- Viewers are summed across **every** live stream a channel is running
+- Automatic stream discovery: new streams are picked up, ended ones dropped
+- History view with raw, hourly, or daily resolution
+- Light and dark mode, responsive layout
+- Rotating ad slots on wide screens (images from `backend/public/ads/`)
+- Quota-friendly: up to 50 videos are checked in a single API call
 
-- **Live comparison chart** that refreshes every 30 seconds, with 1H / 6H / 24H / 3D windows
-- **Multi-stream totals**: viewers are summed across every live stream a channel is running
-- **Automatic stream discovery** that finds new streams and drops ended ones
-- **History view** for any date range, with raw, hourly, or daily resolution
-- **Light and dark mode**, mobile responsive
-- **Side-rail ad slots** on wide screens, rotating client creatives
-- **Quota-friendly polling**: video checks are batched into a single API call
-
-### Tech stack
+**Tech stack**
 
 | Layer | Technology |
 |---|---|
@@ -36,452 +31,563 @@ Kubernetes cluster in sync with Git (GitOps).
 | Database | PostgreSQL 16 (AWS RDS in production) |
 | Containers | Docker (multi-stage, non-root images) |
 | Orchestration | AWS EKS on Fargate (no servers to manage) |
-| Infrastructure as Code | Terraform |
-| CI | GitHub Actions (AWS access via OIDC, no stored keys) |
-| CD | ArgoCD (GitOps) |
+| Infrastructure | Terraform |
+| Delivery | ArgoCD (GitOps), `deploy.sh` for builds and bring-up |
 | Secrets | AWS Secrets Manager + External Secrets Operator |
-| Monitoring | Amazon Managed Prometheus (via ADOT Collector) + CloudWatch Logs |
+| Monitoring | CloudWatch Logs, Amazon Managed Prometheus (via ADOT Collector) |
 
-## Architecture
+**Three ways to run it**
 
-```mermaid
-flowchart LR
-    dev["Developer: git push to main"] --> gha["GitHub Actions: test and build"]
-    gha -->|"push images"| ecr["Amazon ECR"]
-    gha -->|"commit new image tag"| git["deployment/k8s/base"]
-    git --> argo["ArgoCD"]
+| | Where | Database | Section |
+|---|---|---|---|
+| 1 | Your computer, for development | Docker PostgreSQL | [Run locally](#1-run-locally-development) |
+| 2 | Any server, including one EC2 instance | An existing PostgreSQL / RDS | [Docker Compose](#2-run-with-docker-compose-existing-postgresql--rds) |
+| 3 | AWS EKS (Fargate) | RDS created by Terraform | [Deploy to EKS](#3-deploy-to-aws-eks-terraform--argocd), by hand or with [one click from GitHub Actions](#4-one-click-deploy-and-cicd-github-actions) |
 
-    subgraph aws["AWS"]
-        alb["Application Load Balancer"]
-        subgraph eks["EKS on Fargate"]
-            fe["frontend: nginx + React"]
-            be["backend: Node.js + poller"]
-            adot["ADOT Collector"]
-        end
-        rds[("RDS PostgreSQL")]
-        sm["Secrets Manager"]
-        amp["Managed Prometheus"]
-        cw["CloudWatch Logs"]
-    end
+---
 
-    argo --> eks
-    ecr --> eks
-    user["Visitor"] --> alb --> fe
-    fe -->|"/api, /ads-media"| be
-    be --> rds
-    sm -->|"External Secrets Operator"| be
-    be -->|"/metrics"| adot --> amp
-    eks --> cw
-    be -->|"polls every 3 min"| yt["YouTube Data API v3"]
-```
-
-## Repository structure
+## Architecture (EKS deployment)
 
 ```
-yt-viewer-tracker/
-├── backend/                  Node.js API + YouTube poller
-│   ├── server.js             Express app: /api/*, /ads-media, /healthz, /metrics
-│   ├── poller.js             Polling loop with stream discovery
-│   ├── youtube.js            YouTube Data API calls
-│   ├── db.js                 PostgreSQL storage and queries
-│   ├── ads.js / ads.json     Ad creatives for the side rails
-│   ├── config.json           Channels to track
-│   └── public/ads/           Ad images
-├── frontend/                 React + Vite dashboard
-├── deployment/
-│   ├── docker/               Dockerfile.backend, Dockerfile.frontend, nginx.conf
-│   ├── terraform/
-│   │   ├── modules/          Reusable building blocks (no app-specific values)
-│   │   │   ├── vpc/  eks-fargate/  rds-postgres/  ecr/
-│   │   │   └── app-secrets/  irsa-role/  github-oidc/  prometheus/
-│   │   ├── environments/
-│   │   │   └── production/   This app: wires the modules + terraform.tfvars
-│   │   └── policies/         Official AWS Load Balancer Controller IAM policy
-│   ├── k8s/base/             Kubernetes manifests (Kustomize)
-│   └── scripts/bootstrap.sh  One-command AWS bootstrap
-├── argocd/application.yaml   ArgoCD Application
-└── .github/workflows/        CI/CD pipeline
+┌──────────────────────────────────────────────────────────────────────┐
+│                                                                      │
+│  Internet                                                            │
+│     │                                                                │
+│     ▼                                                                │
+│  AWS Application Load Balancer  (created by the AWS Load Balancer    │
+│     │                            Controller from ingress.yaml)       │
+│     ▼                                                                │
+│  ┌────────────────────────────────────────────────────────────────┐  │
+│  │  EKS cluster "yt-viewer-tracker" on Fargate (ap-south-1)       │  │
+│  │  ┌──────────────────────────────────────────────────────────┐  │  │
+│  │  │ Namespace: yt-viewer-tracker                             │  │  │
+│  │  │  [frontend x2]  nginx + React, runs as uid 101           │  │  │
+│  │  │       │  /api/*  /ads-media/*  →  backend:4000           │  │  │
+│  │  │  [backend x1]   Node.js API + YouTube poller             │  │  │
+│  │  │  [adot-collector]  scrapes /metrics → Managed Prometheus │  │  │
+│  │  └──────────────────────────────────────────────────────────┘  │  │
+│  │  argocd            watches this repo (branch devops), auto-sync │  │
+│  │  external-secrets  Secrets Manager → Kubernetes Secret         │  │
+│  │  kube-system       AWS Load Balancer Controller, CoreDNS       │  │
+│  └─────────────────────────────┬──────────────────────────────────┘  │
+│                                ▼                                     │
+│  RDS PostgreSQL 16  (private subnets, encrypted, 7-day backups)      │
+│                                                                      │
+│  ECR            yt-viewer-tracker-backend, yt-viewer-tracker-frontend│
+│  Secrets Mgr    yt-viewer-tracker/database-url, .../api-keys         │
+│  Logs/Metrics   CloudWatch (Fargate Fluent Bit), Managed Prometheus  │
+│                                                                      │
+│  deploy.sh build + push → ECR → commit new image tag → ArgoCD syncs  │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## Part 1: Run locally (development)
-
-### Prerequisites
-
-- [Node.js 22](https://nodejs.org/)
-- PostgreSQL 16: either installed locally, or through Docker (easiest)
-- A YouTube Data API v3 key (see below)
-
-### Get a YouTube Data API key
-
-1. Open the [Google Cloud Console](https://console.cloud.google.com/) and create or select a project.
-2. Go to **APIs & Services → Library**, search for **YouTube Data API v3**, and click **Enable**.
-3. Go to **APIs & Services → Credentials → Create credentials → API key**.
-4. Restrict the key to **YouTube Data API v3**.
-
-The API is free and does not bill your card. Each project gets 10,000 quota
-units per day; when they run out, requests fail until midnight Pacific time.
-
-> **Never commit your key.** Keep it in `backend/.env` (already gitignored)
-> and nowhere else. If a key ever lands in a commit, regenerate it right away.
-> Deleting the line is not enough, because it stays in git history.
-
-### 1. Start PostgreSQL
-
-With Docker:
-
-```bash
-docker run -d --name yt-postgres \
-  -e POSTGRES_PASSWORD=devpassword \
-  -e POSTGRES_DB=yt_viewer_tracker \
-  -p 5432:5432 postgres:16
-```
-
-Without Docker, install PostgreSQL and create an empty database named
-`yt_viewer_tracker`. With pgAdmin, right-click **Databases → Create →
-Database**. With `psql`, run `CREATE DATABASE yt_viewer_tracker;`.
-
-> **Windows:** `createdb` and `\l` work only inside a PostgreSQL shell, not in
-> PowerShell. Use pgAdmin, or open `psql` first:
-> `& "C:\Program Files\PostgreSQL\18\bin\psql.exe" -U postgres -h localhost`
-
-The app creates its own table on first start, so you don't need to set up a schema.
-
-### 2. Start the backend
-
-```bash
-cd backend
-npm install
-cp .env.example .env
-```
-
-Edit `backend/.env`:
-
-```env
-YOUTUBE_API_KEY=your-key-here
-DATABASE_URL=postgres://postgres:devpassword@localhost:5432/yt_viewer_tracker
-PGSSL=false
-```
-
-Then start it:
-
-```bash
-npm start
-```
-
-You should see:
+## Project structure
 
 ```
-[db] connected to PostgreSQL, schema ready
-[server] listening on http://localhost:4000
-[poller] RBANGLA: discovery found 10 live stream(s)
+.
+├── backend/                       Node.js API + YouTube poller
+│   ├── server.js                  /api/*, /ads-media, /healthz, /metrics
+│   ├── poller.js                  polling, stream discovery, summing
+│   ├── youtube.js                 YouTube Data API calls
+│   ├── db.js                      PostgreSQL access
+│   ├── ads.js, ads.json           ad creatives for the side rails
+│   ├── config.json                channels to track
+│   ├── .env.example               every setting, with comments
+│   └── public/ads/                ad images
+├── frontend/                      React + Vite dashboard
+│   └── src/components/            Navbar, LiveView, HistoryView, ChartPanel, ...
+├── argocd/
+│   ├── root-app.yaml              "app of apps", applied once
+│   └── apps/yt-viewer-tracker.yaml
+├── .github/workflows/             deploy.yml, destroy.yml, release.yml (GitHub Actions)
+├── .gitignore                     keeps Terraform state, .env, node_modules out of git
+└── deployment/
+    ├── docker/
+    │   ├── Dockerfile.backend     multi-stage, runs as non-root "node"
+    │   ├── Dockerfile.frontend    multi-stage, nginx as uid 101
+    │   ├── nginx.conf             proxies /api/ and /ads-media/ → backend:4000
+    │   └── docker-compose.yaml    backend + frontend, bring your own database
+    ├── k8s/base/                  Kubernetes manifests (Kustomize)
+    ├── scripts/deploy.sh          every deployment task, one entry point
+    ├── scripts/bootstrap.sh       one-time: state bucket, lock table, CI role
+    └── terrafrom/                 Terraform
+        ├── main.tf                connects the modules
+        ├── provider.tf            providers, S3 backend
+        ├── variables.tf, terraform.tfvars, output.tf
+        ├── modules/               vpc, eks-fargate, rds-postgres, ecr,
+        │                          app-secrets, irsa-role, github-oidc, prometheus
+        └── policies/              official AWS Load Balancer Controller IAM policy
 ```
 
-> Timestamps in the log are in UTC (they end in `Z`). The dashboard converts
-> them to your local time.
+---
 
-### 3. Start the frontend
+## Get a YouTube API key
 
-In a second terminal:
+1. [Google Cloud Console](https://console.cloud.google.com/) → create or select a project
+2. **APIs & Services → Library** → **YouTube Data API v3** → **Enable**
+3. **APIs & Services → Credentials → Create credentials → API key**
+4. Restrict the key to **YouTube Data API v3**
 
-```bash
-cd frontend
-npm install
-npm run dev
-```
+It's free: 10,000 quota units per project per day, reset at midnight Pacific.
 
-Open http://localhost:5173. Vite forwards `/api` and `/ads-media` to the backend on port 4000.
+> **Never commit the key.** If a key ever lands in a commit, regenerate it.
+> Deleting the line doesn't remove it from git history.
 
-### Choose which channels to track
+### Channels to track
 
 Edit `backend/config.json`:
 
 ```json
-{
-  "channels": [
-    {
-      "name": "RBANGLA",
-      "color": "#E5384B",
-      "channelId": "UCajVjEHDoVn_AHsunUZz_EQ",
-      "videoIds": ["YoAzEs1GwJg"],
-      "autoDiscover": true
-    }
-  ]
-}
+{ "name": "RBANGLA", "color": "#E5384B", "channelId": "UCajVjEHDoVn_AHsunUZz_EQ",
+  "videoIds": ["YoAzEs1GwJg"], "autoDiscover": true }
 ```
 
-- `channelId`: from the channel page, **About → Share channel → Copy channel ID**
-- `videoIds`: optional pinned live streams, taken from the `v=` part of the URL. Checking these costs almost no quota.
-- `autoDiscover`: if `true`, the app finds the channel's other live streams on its own. Each search costs 100 quota units.
+- `channelId`: channel page → **About → Share channel → Copy channel ID**
+- `videoIds`: optional pinned live streams (the `v=` part of the URL). Checking them costs almost nothing.
+- `autoDiscover`: finds the channel's other live streams automatically (100 quota units per search).
 
 ---
 
-## Part 2: Run with Docker (local)
+## 1. Run locally (development)
 
-The production images can run together on one Docker network. The container
-names matter: nginx forwards API calls to a host named `backend`.
+Needs Node.js 22 and Docker (for PostgreSQL).
 
 ```bash
-# From the repository root
-docker network create ytnet
+# PostgreSQL
+docker run -d --name yt-postgres -e POSTGRES_PASSWORD=devpassword \
+  -e POSTGRES_DB=yt_viewer_tracker -p 5432:5432 postgres:16
 
-docker run -d --name postgres --network ytnet \
-  -e POSTGRES_PASSWORD=devpassword -e POSTGRES_DB=yt_viewer_tracker postgres:16
+# Backend (terminal 1)
+cd backend
+npm install
+cp .env.example .env
+# edit .env:
+#   YOUTUBE_API_KEY=your-key
+#   DATABASE_URL=postgres://postgres:devpassword@localhost:5432/yt_viewer_tracker
+#   PGSSL=false
+npm start
 
-docker build -t yt-backend  -f deployment/docker/Dockerfile.backend  .
-docker build -t yt-frontend -f deployment/docker/Dockerfile.frontend .
-
-docker run -d --name backend --network ytnet --restart on-failure \
-  -e DATABASE_URL=postgres://postgres:devpassword@postgres:5432/yt_viewer_tracker \
-  -e PGSSL=false \
-  -e YOUTUBE_API_KEY=your-key-here \
-  yt-backend
-
-docker run -d --name frontend --network ytnet -p 8080:8080 yt-frontend
+# Frontend (terminal 2)
+cd frontend
+npm install
+npm run dev          # http://localhost:5173
 ```
 
-Open http://localhost:8080.
-
-- The Dockerfiles need BuildKit, which is on by default in current Docker Desktop and Docker Engine.
-- `--restart on-failure` restarts the backend if it starts before PostgreSQL is ready.
-- Health checks: `curl localhost:8080/health` for the frontend, and `docker exec backend wget -qO- localhost:4000/healthz` for the backend.
+The backend creates its own table on first start. You should see
+`[db] connected to PostgreSQL, schema ready`. Log timestamps are UTC; the
+dashboard shows local time. In development, Vite forwards `/api` and
+`/ads-media` to the backend on port 4000.
 
 ---
 
-## Part 3: Deploy to AWS
+## 2. Run with Docker Compose (existing PostgreSQL / RDS)
+
+`deployment/docker/docker-compose.yaml` runs the **backend and the frontend**.
+It does not start a database: you bring your own PostgreSQL, such as an RDS
+instance you already have.
+
+```bash
+cd deployment/docker
+export DATABASE_URL='postgres://USER:PASSWORD@YOUR-RDS-ENDPOINT:5432/YOUR_DB_NAME'
+export YOUTUBE_API_KEY='your-key'
+docker compose up -d --build
+```
+
+PowerShell:
+
+```powershell
+cd deployment\docker
+$env:DATABASE_URL = 'postgres://USER:PASSWORD@YOUR-RDS-ENDPOINT:5432/YOUR_DB_NAME'
+$env:YOUTUBE_API_KEY = 'your-key'
+docker compose up -d --build
+```
+
+Then open **http://localhost:8080** (or `http://<server-ip>:8080`) and check:
+
+```bash
+docker compose ps                    # both running, backend "(healthy)"
+docker compose logs -f backend       # want: [db] connected to PostgreSQL, schema ready
+curl localhost:8080/health           # healthy
+curl localhost:8080/api/channels     # your channels as JSON
+```
+
+Stop with `docker compose down`. Your database is not touched.
+
+Rules for the database:
+
+- It must be **PostgreSQL**, and the database named at the end of the URL must already exist (the app creates its table, not the database).
+- **URL-encode special characters in the password:** `#` → `%23`, `@` → `%40`, `!` → `%21`.
+- `PGSSL` defaults to `true` (RDS expects SSL). For a database without SSL, `export PGSSL=false`.
+- The server running Docker must be able to reach the database on port 5432 (see below).
+
+### On an EC2 instance
+
+Size: **t3.small** (2 GB) is enough to run the app; the backend uses about
+80 MB. Use **t3.medium** (4 GB) if the same instance also runs `deploy.sh`.
+Use an Intel/AMD type (not ARM) if you will build images for EKS.
+
+Amazon Linux 2023:
+
+```bash
+sudo dnf install -y docker git
+sudo systemctl enable --now docker
+sudo usermod -aG docker "$USER"          # then log out and back in
+
+# Compose and Buildx plugins (the Dockerfiles need BuildKit)
+ARCH="$(uname -m)"; BX="$([ "$ARCH" = x86_64 ] && echo amd64 || echo arm64)"
+sudo mkdir -p /usr/local/lib/docker/cli-plugins
+sudo curl -fsSL "https://github.com/docker/compose/releases/download/v2.29.7/docker-compose-linux-$ARCH" \
+  -o /usr/local/lib/docker/cli-plugins/docker-compose
+sudo curl -fsSL "https://github.com/docker/buildx/releases/download/v0.17.1/buildx-v0.17.1.linux-$BX" \
+  -o /usr/local/lib/docker/cli-plugins/docker-buildx
+sudo chmod +x /usr/local/lib/docker/cli-plugins/*
+
+git clone -b devops https://github.com/wasim0028/yt-viewer-tracker.git    # the branch with the deployment code
+cd yt-viewer-tracker/deployment/docker
+```
+
+Then follow the Compose steps above. Also:
+
+- **Security group (instance):** port **22** from your own IP only, and port **8080** for the app.
+- **Security group (RDS):** allow **PostgreSQL 5432** from the instance's security group. Keep both in the same VPC. If the instance is outside the VPC, the database needs *Publicly accessible* turned on, and an inbound rule for the instance's IP.
+
+---
+
+## 3. Deploy to AWS EKS (Terraform + ArgoCD)
+
+Everything goes through one script: `deployment/scripts/deploy.sh`. Run it
+with no arguments for the command list.
 
 ### What gets created
 
 | Resource | Purpose |
 |---|---|
-| VPC | 2 public + 2 private subnets across 2 AZs, 1 NAT gateway |
-| EKS cluster on Fargate | Runs every pod; no EC2 nodes to patch |
-| RDS PostgreSQL 16 | Private, encrypted, 7-day backups |
-| 2 ECR repositories | Backend and frontend images, scanned on push, last 10 kept |
-| 2 Secrets Manager secrets | `database-url` (automatic) and `api-keys` (you fill in) |
-| IAM roles | GitHub Actions (OIDC), External Secrets, ADOT, Load Balancer Controller, Fargate pod execution |
+| VPC | 3 public + 3 private subnets across 3 AZs, 1 NAT gateway |
+| EKS cluster on Fargate | No EC2 nodes to patch; one Fargate profile per namespace |
+| RDS PostgreSQL 16 | Private, encrypted, 7-day backups, password generated for you |
+| 2 ECR repositories | `yt-viewer-tracker-backend` and `-frontend`, immutable tags, last 10 images kept |
+| 2 Secrets Manager secrets | `yt-viewer-tracker/database-url` (automatic) and `.../api-keys` (you fill in) |
+| IAM roles | External Secrets, ADOT collector, Load Balancer Controller, GitHub OIDC |
 | Amazon Managed Prometheus | Metrics storage |
+| S3 bucket + DynamoDB table | Terraform state and locking; created once by `bootstrap.sh`, outside this stack |
 
-> **Cost:** this runs around the clock and is billed hourly. The EKS control
-> plane, the NAT gateway, and the load balancer are paid even with no traffic,
-> on top of RDS and Fargate. Check the
-> [AWS Pricing Calculator](https://calculator.aws/) for your region before you
-> deploy, and see [Tear down](#tear-down) to remove everything.
+> **Cost:** this runs around the clock. See [Cost estimate](#cost-estimate),
+> and [Teardown](#teardown) to remove everything.
 
 ### Prerequisites
 
-Install these and make sure each one is on your `PATH`:
-
-| Tool | Version | Check |
-|---|---|---|
-| [AWS CLI](https://aws.amazon.com/cli/) | v2 | `aws --version` |
-| [Terraform](https://developer.hashicorp.com/terraform/install) | 1.7 or newer | `terraform version` |
-| [kubectl](https://kubernetes.io/docs/tasks/tools/) | 1.30 | `kubectl version --client` |
-| [Helm](https://helm.sh/docs/intro/install/) | 3 | `helm version` |
-| [kustomize](https://kubectl.docs.kubernetes.io/installation/kustomize/) | 5 | `kustomize version` |
-| [jq](https://jqlang.github.io/jq/) | any | `jq --version` |
-
-`bootstrap.sh` checks for all six tools before it creates anything.
-
-> **Windows:** `bootstrap.sh` is a Bash script and won't run in PowerShell.
-> Use **WSL** (recommended) or **Git Bash**, and install the tools above
-> inside that environment.
-
-### Step 1: Configure AWS access
+Linux, macOS, or **WSL on Windows**: `deploy.sh` is Bash and won't run in
+PowerShell. `deploy.sh` checks for every tool before it changes anything.
 
 ```bash
-aws configure
-# AWS Access Key ID, Secret Access Key, default region: ap-south-1, output: json
+# 1. AWS CLI v2
+curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o awscliv2.zip
+unzip awscliv2.zip && sudo ./aws/install
 
-aws sts get-caller-identity   # confirms which account you're deploying into
+# 2. Terraform >= 1.6
+wget https://releases.hashicorp.com/terraform/1.7.0/terraform_1.7.0_linux_amd64.zip
+unzip terraform_1.7.0_linux_amd64.zip && sudo mv terraform /usr/local/bin/
+
+# 3. kubectl
+curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+
+# 4. Helm
+curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+# 5. Docker Engine (official install script; on Amazon Linux see the EC2 section above)
+curl -fsSL https://get.docker.com | sudo sh && sudo usermod -aG docker "$USER"   # then log out and back in
+
+# 6. kustomize (standalone binary, NOT snap: snap's sandbox blocks access to
+#    paths outside $HOME and fails with confusing "permission denied" errors)
+curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
+sudo mv kustomize /usr/local/bin/
+
+# 7. ArgoCD CLI (optional, for troubleshooting)
+curl -sSL -o argocd-linux-amd64 https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
+sudo install -m 555 argocd-linux-amd64 /usr/local/bin/argocd
+rm argocd-linux-amd64
+
+# 8. jq and git
+sudo apt-get install -y jq git          # or: sudo dnf install -y jq git
 ```
 
-These credentials stay on your machine. They are never stored in the repo,
-Secrets Manager, or GitHub.
+Running by hand from your own machine is optional: the
+[GitHub Actions workflows](#4-one-click-deploy-and-cicd-github-actions) install
+Terraform, kubectl, Helm and kustomize themselves and run the same commands.
 
-### Step 2: Check the settings
+### Step-by-step
 
-All infrastructure settings for this app are in one file:
-`deployment/terraform/environments/production/terraform.tfvars`.
-
-1. **Your GitHub repo:** check `github_repo` in `terraform.tfvars` and
-   `repoURL` in `argocd/application.yaml`. Both must point to your repo. The
-   GitHub Actions role trusts only pushes to `main` on this exact repo.
-2. **Region:** the default is `ap-south-1` (Mumbai). To change it, update
-   `aws_region` and `availability_zones` in `terraform.tfvars`, the `region` in
-   `deployment/k8s/base/cluster-secret-store.yaml` and
-   `aws-logging-configmap.yaml`, and `AWS_REGION` in the workflow.
-3. **Other AWS apps:** if this AWS account already has a GitHub OIDC provider
-   (for example, from another app deployed with these modules), set
-   `create_github_oidc_provider = false`. An account can only have one.
-4. **Channels:** `backend/config.json`, as in Part 1.
-
-### Step 3: Store Terraform state remotely (recommended)
-
-By default, Terraform keeps its state in a local file. If that file is lost,
-Terraform can no longer manage what it created. For anything beyond a test,
-create an S3 bucket and a DynamoDB lock table, then uncomment the
-`backend "s3"` block in `deployment/terraform/environments/production/versions.tf`
-and fill in their names. Give every app and environment its own `key`.
-
-### Step 4: Review the plan
+**Step 1: AWS credentials.**
 
 ```bash
-cd deployment/terraform/environments/production
-terraform init
-terraform plan
+aws configure                        # region: ap-south-1
+aws sts get-caller-identity          # confirm which account you're deploying into
 ```
 
-Read the plan before going further. `bootstrap.sh` runs `terraform apply`
-with `-auto-approve`, so this is your chance to check what will be created.
+Terraform creates IAM roles, EKS, and RDS, so the user needs broad
+permissions. For the first deploy, `AdministratorAccess` is simplest. On an
+EC2 instance, attach an IAM role instead of using access keys.
 
-### Step 5: Run the bootstrap script
+**Step 2: Choose the branch ArgoCD watches.** The deployable code is on the
+`devops` branch of `github.com/wasim0028/yt-viewer-tracker` (`main` holds the
+application only). ArgoCD deploys whatever is committed on the branch named in
+`targetRevision`, so in **both** `argocd/root-app.yaml` and
+`argocd/apps/yt-viewer-tracker.yaml` set:
 
-From the repository root:
+```yaml
+targetRevision: devops
+```
+
+Commit and push that change before Step 10. To use another repo or branch,
+change `repoURL` and `targetRevision` in the same two files. The repository
+must be public, or you must register credentials for it in ArgoCD.
+
+**Step 3: (Optional) choose your own database password.**
 
 ```bash
-chmod +x deployment/scripts/bootstrap.sh
-./deployment/scripts/bootstrap.sh
+read -rsp "RDS password: " TF_VAR_db_password; echo
+export TF_VAR_db_password
 ```
 
-The script is safe to re-run: each step checks whether its work is already done.
+Skip this and Terraform generates a strong one. Rules (RDS's own): 8–128
+characters, no `/`, `@`, `"`, or spaces. `read -s` keeps it out of your shell
+history. If you set one, **set it on every Terraform run**: a run without it
+switches the database to a generated password.
 
-| Step | What it does |
+**Step 3b: Create the remote state (once per AWS account). Required before Step 5.**
+
+```bash
+bash deployment/scripts/bootstrap.sh
+```
+
+Creates the S3 bucket and lock table that hold Terraform state, plus the role GitHub Actions uses (see [section 4](#4-one-click-deploy-and-cicd-github-actions)). Safe to re-run. Until it has run, `deploy.sh init` stops with `State bucket '...' not found`.
+
+> **Already have a local `terraform.tfstate` from an earlier deploy?** If that stack still exists in AWS, move its state into S3 before anything else: from `deployment/terrafrom` run `terraform init -migrate-state -reconfigure` with the same `-backend-config` values `deploy.sh init` uses (bucket `yt-viewer-tracker-tfstate-<account id>`, key `yt-viewer-tracker/terraform.tfstate`, your region, table `yt-viewer-tracker-tf-locks`, `encrypt=true`) and answer `yes`. Skipping this makes Terraform see an empty state and try to create everything again. If the old stack is already destroyed, just delete the local `terraform.tfstate*` files.
+
+**Step 4: Check the settings** in `deployment/terrafrom/terraform.tfvars`:
+
+| Setting | Value |
 |---|---|
-| 1 | `terraform apply`: creates all AWS resources (about 15–20 minutes, mostly EKS and RDS) |
-| 2 | Points `kubectl` at the new cluster |
-| 3 | Lets CoreDNS run on Fargate. Without this, in-cluster DNS doesn't work. |
-| 4 | **Asks for your YouTube API key** (typing is hidden) and saves it to Secrets Manager |
-| 5 | Installs External Secrets Operator, the AWS Load Balancer Controller (with its IAM role and VPC ID), and ArgoCD |
-| 6 | Copies the Terraform outputs (role ARNs, ECR URLs, Prometheus endpoint) into the manifests |
-| 7 | Registers the app with ArgoCD |
+| `aws_region` | `ap-south-1` |
+| `app_namespace` | `yt-viewer-tracker` |
+| `ecr_repositories` | `["backend", "frontend"]` |
+| `db_name`, `db_username` | `yt_viewer_tracker`, `yt_viewer_admin` |
+| `api_key_names` | `["YOUTUBE_API_KEY", "ADS_API_KEY"]` |
+| `github_repo` | `wasim0028/yt-viewer-tracker` |
 
-### Step 6: Commit the filled-in files
+The region `ap-south-1` is also set in `provider.tf` and in three Kubernetes
+files (`cluster-secret-store.yaml`, `aws-logging-configmap.yaml`,
+`adot-collector.yaml`). Change all of them together.
 
-Step 6 of the script edited files in your working copy. ArgoCD and GitHub
-Actions read from GitHub, so push those changes:
-
-```bash
-git add deployment/k8s/base .github/workflows/deploy.yaml
-git commit -m "chore: fill in AWS resource identifiers"
-git push origin main
-```
-
-This push also starts the first build. GitHub Actions tests both apps, builds
-and pushes the images to ECR, and commits the new image tag. ArgoCD then
-deploys it.
-
-### Step 7: Verify
+**Step 5: Terraform.**
 
 ```bash
-# Pods should be Running and READY
-kubectl get pods -n yt-viewer-tracker
-
-# Secrets synced from Secrets Manager (STATUS: SecretSynced)
-kubectl get externalsecret -n yt-viewer-tracker
-
-# Public address (the ALB takes a few minutes to appear)
-kubectl get ingress -n yt-viewer-tracker
-
-# Backend logs
-kubectl logs -n yt-viewer-tracker deploy/backend -f
+./deployment/scripts/deploy.sh init
+./deployment/scripts/deploy.sh plan      # read it: on a fresh account everything is "to add"
+./deployment/scripts/deploy.sh apply     # type "yes"
 ```
 
-**ArgoCD dashboard:**
+`apply` takes roughly 15–25 minutes, mostly EKS and RDS. **Let it finish.**
+Interrupting it can leave resources half-created.
+
+**Step 6: Cluster add-ons.**
 
 ```bash
-# Initial admin password
-kubectl -n argocd get secret argocd-initial-admin-secret \
-  -o jsonpath='{.data.password}' | base64 -d; echo
-
-# Open https://localhost:8080 (username: admin)
-kubectl port-forward svc/argocd-server -n argocd 8080:443
+./deployment/scripts/deploy.sh addons
 ```
+
+Points `kubectl` at the cluster, lets CoreDNS run on Fargate (without this,
+in-cluster DNS never works on a cluster with no EC2 nodes), and installs
+External Secrets Operator, the AWS Load Balancer Controller (with its IAM role
+and the VPC ID, which Fargate can't discover on its own), and ArgoCD.
+
+Fargate pods take **1–2 minutes** to start, so this step waits. **Run it before
+Step 10:** it installs the ArgoCD custom resources that Step 10 needs. Check:
+
+```bash
+kubectl get crd | grep argoproj          # expect 3 lines (applications, applicationsets, appprojects)
+kubectl get pods -A                      # everything Running
+```
+
+If it stops with `deployment "coredns" exceeded its progress deadline`, the
+CoreDNS pods were created before the Fargate profile existed and stay
+`Pending`. Restart them, then re-run `addons`:
+
+```bash
+kubectl patch deployment coredns -n kube-system --type merge \
+  -p '{"spec":{"template":{"metadata":{"annotations":{"eks.amazonaws.com/compute-type":"fargate"}}}}}'
+kubectl rollout restart deployment coredns -n kube-system
+kubectl rollout status deployment coredns -n kube-system --timeout=600s
+./deployment/scripts/deploy.sh addons
+```
+
+**Step 7: Your YouTube API key.**
+
+```bash
+./deployment/scripts/deploy.sh secrets
+```
+
+Prompts for the key (hidden) and saves it to Secrets Manager. Terraform never
+sees or overwrites it. Set `YOUTUBE_API_KEY` in the environment to skip the prompt.
+
+**Step 8: Write AWS identifiers into the manifests.**
+
+```bash
+./deployment/scripts/deploy.sh configure
+```
+
+Writes the IAM role ARNs and the Prometheus endpoint into
+`deployment/k8s/base/`.
+
+**Step 9: Build and push the first images.**
+
+```bash
+git add -A && git commit -m "Configure AWS identifiers"    # tags use the commit ID
+./deployment/scripts/deploy.sh build
+./deployment/scripts/deploy.sh push
+```
+
+Images are tagged with the 12-character git commit ID. `push` points
+`deployment/k8s/base/kustomization.yaml` at them.
+
+**Step 10: Register the app with ArgoCD.** Needs Step 6 done and `targetRevision`
+pushed (Step 2).
+
+```bash
+./deployment/scripts/deploy.sh argocd
+```
+
+`no matches for kind "Application"` means the ArgoCD CRDs are missing: run
+`deploy.sh addons` first.
+
+**Step 11: Commit what the script changed** (on the `devops` branch). ArgoCD
+deploys **what is in git**, not what is on your machine. Until you push, pods show
+`ImagePullBackOff` or `InvalidImageName`. That is expected here, not a bug.
+
+```bash
+git add deployment/k8s/base
+git commit -m "Set image tags and AWS identifiers"
+git push origin devops
+```
+
+**Step 12: Get the URL.**
+
+```bash
+./deployment/scripts/deploy.sh status
+```
+
+Shows the ArgoCD apps, pods, secret sync, and the load balancer address. The
+load balancer takes 3–5 minutes to appear. Open `http://<address>`: plain
+HTTP until you add a certificate.
+
+**Load balancer and Ingress.** Yes, both are part of this deployment.
+`deployment/k8s/base/ingress.yaml` is a Kubernetes Ingress (`ingressClassName:
+alb`, internet-facing, `target-type: ip`, HTTP port 80) that sends `/` to the
+`frontend` Service on port 8080. The AWS Load Balancer Controller installed by
+`addons` sees it and creates the Application Load Balancer; nginx in the
+frontend pods then forwards `/api/` and `/ads-media/` to the backend.
+Terraform does not create this ALB, which is why `destroy` removes it first.
+
+> `deploy.sh all` runs apply → addons → secrets → configure → build → push →
+> argocd in one go, then tells you to commit. Doing the steps one at a time is
+> easier to debug on a first bring-up.
+
+### Deploying changes
+
+With [GitHub Actions](#4-one-click-deploy-and-cicd-github-actions) set up, pushing to `devops` does this for you. By hand:
+
+```bash
+git add -A && git commit -m "Your change"
+./deployment/scripts/deploy.sh build
+./deployment/scripts/deploy.sh push
+git add deployment/k8s/base && git commit -m "Deploy new image" && git push origin devops
+```
+
+ArgoCD sees the new tag and does a rolling update. To roll back, `git revert`
+the commit that changed the tag in `kustomization.yaml`. ECR keeps the last 10
+images of each repository.
 
 ---
 
-## How a deployment works after setup
+## 4. One-click deploy and CI/CD (GitHub Actions)
 
-```
-git push origin main
-   │
-   ├─ GitHub Actions
-   │    1. npm test (backend, frontend)
-   │    2. Build both images, tag with the commit SHA, push to ECR
-   │    3. kustomize edit set image → commit to deployment/k8s/base  [skip ci]
-   │
-   └─ ArgoCD sees the commit → syncs the cluster → rolling update
-```
+Three workflows in `.github/workflows/` drive the same `deploy.sh` commands from GitHub. They sign in to AWS with OIDC, so **no AWS keys are stored anywhere**.
 
-The pipeline never touches the cluster directly; Git is the single source of
-truth. ArgoCD also reverts manual `kubectl` edits (`selfHeal`). To roll back,
-`git revert` the deploy commit.
-
----
-
-## Reuse the Terraform for another application
-
-The Terraform is split so other applications can use it without copying code:
-
-- **`deployment/terraform/modules/`** holds reusable building blocks. None of
-  them contain app names, regions, or other app-specific values.
-- **`deployment/terraform/environments/<name>/`** is one deployment. It wires
-  the modules together, and all of its values live in `terraform.tfvars`.
-
-| Module | Creates | Key inputs |
+| Workflow | Starts when | What it does |
 |---|---|---|
-| `vpc` | VPC, 2 public + 2 private subnets, NAT gateway, subnet tags for EKS | `name`, `cidr`, `azs`, `cluster_name` |
-| `eks-fargate` | EKS cluster with no EC2 nodes, a Fargate profile per namespace, pod execution role with ECR pull | `cluster_name`, `subnet_ids`, `fargate_namespaces` |
-| `rds-postgres` | Private encrypted PostgreSQL with a generated password and a security group | `identifier`, `subnet_ids`, `allowed_security_group_ids` |
-| `ecr` | One repository per image, scan on push, immutable tags, old-image cleanup | `name_prefix`, `repositories` |
-| `app-secrets` | `<prefix>/database-url` (Terraform-managed) and `<prefix>/api-keys` (you fill in) | `name_prefix`, `database_url`, `api_key_names` |
-| `irsa-role` | IAM role that exactly one Kubernetes service account can assume | `namespace`, `service_account`, `policy_json` |
-| `github-oidc` | Role GitHub Actions assumes to push to ECR, with no stored keys | `github_repo`, `ecr_repository_arns`, `create_oidc_provider` |
-| `prometheus` | Amazon Managed Prometheus workspace | `alias` |
+| **Deploy infrastructure** (`deploy.yml`) | You click *Run workflow* | Builds everything: VPC, EKS, RDS, add-ons, images, ArgoCD. About 30-40 minutes. Prints the site URL in the run summary. |
+| **Release** (`release.yml`) | Push to `devops` that changes `backend/`, `frontend/` or `deployment/docker/` | Builds and pushes new images, commits the new tag, ArgoCD rolls it out. Does nothing if the cluster isn't deployed. |
+| **Destroy infrastructure** (`destroy.yml`) | You click *Run workflow* and type `destroy` | Removes the load balancer, empties ECR, destroys everything, and frees the secret names so you can redeploy at once. Tick the box to also delete the final DB snapshot. |
 
-### Deploy a second application
+### One-time setup (about 10 minutes)
+
+**0. Prepare the repository.** Do this once, before the first push:
 
 ```bash
-cd deployment/terraform/environments
-cp -r production my-other-app
+git checkout devops                     # the deployable, default branch
+
+# Remove files from older layouts if they exist
+git rm -f --ignore-unmatch .github/workflows/deploy.yaml argocd/application.yaml
+
+# Never commit Terraform state: it contains the database password
+printf '%s\n' '*.tfstate' '*.tfstate.*' '.terraform/' '.env' 'node_modules/' >> .gitignore
+git ls-files | grep -E 'tfstate|\.env$' && echo "REMOVE THESE: git rm --cached <file>"
+
+# Scripts must start with a shebang, be executable, and use Unix line endings
+head -1 deployment/scripts/*.sh                        # each must print #!/usr/bin/env bash
+sed -i 's/\r$//' deployment/scripts/*.sh .github/workflows/*.yml
+chmod +x deployment/scripts/*.sh
+git add -A
+git update-index --chmod=+x deployment/scripts/deploy.sh deployment/scripts/bootstrap.sh
+git ls-files -s deployment/scripts/                    # both must show mode 100755
+
+git commit -m "Add GitHub Actions CI/CD" && git push origin devops
 ```
 
-Then edit `my-other-app/terraform.tfvars`:
+Both `argocd/root-app.yaml` and `argocd/apps/yt-viewer-tracker.yaml` must say `targetRevision: devops`. The *Run workflow* button only appears for workflows that are on the repository's default branch.
 
-```hcl
-project_name                = "my-other-app"
-vpc_cidr                    = "10.30.0.0/16"   # different range from other apps
-app_namespace               = "my-other-app"
-ecr_repositories            = ["api", "web"]
-db_name                     = "my_other_app"
-db_username                 = "my_other_app_admin"
-api_key_names               = ["STRIPE_API_KEY"]
-github_repo                 = "your-org/my-other-app"
-create_github_oidc_provider = false              # the account already has one
+**1. Run the bootstrap script** with your own admin login, in a terminal or AWS CloudShell:
+
+```bash
+bash deployment/scripts/bootstrap.sh
 ```
 
-Also in the copied folder:
+It creates the Terraform state bucket and lock table, the GitHub OIDC provider, and the IAM role `yt-viewer-tracker-gha-deployer`, which only this repo's `production` environment can use. These live **outside** the main Terraform on purpose: a destroy must not delete its own state or the role it is running as. At the end it prints the values for step 2.
 
-1. In `versions.tf`, give the S3 backend its own `key`, if you use one.
-2. In `outputs.tf`, `ecr_backend_repository_url` and `ecr_frontend_repository_url`
-   look up the repositories named `backend` and `frontend`. Rename or remove
-   them to match your `ecr_repositories`. The `ecr_repository_urls` output
-   lists every repository.
+**2. In GitHub** (repo, then Settings):
 
-Then deploy it with `TF_ENV=my-other-app ./deployment/scripts/bootstrap.sh`.
-The other app's Kubernetes manifests, Dockerfiles, and workflow are its own;
-the Terraform modules are what's shared.
+| Where | What |
+|---|---|
+| Environments, new environment | Name it `production`. Optional: add *Required reviewers* for an approval before every run, and restrict *Deployment branches* to `devops`. |
+| Secrets and variables, Actions, **Variables** | `AWS_ROLE_ARN` = the role ARN the script printed |
+| Environment `production`, **Secrets** | `YOUTUBE_API_KEY` = your key. Optional: `DB_PASSWORD` = your own RDS password (generated if unset). |
+| Actions, General, Workflow permissions | *Read and write permissions* (workflows commit the image tag) |
 
-To share the modules across separate Git repositories instead of copying,
-point `source` at a Git URL with a pinned tag:
+**3. Open Actions, Deploy infrastructure, Run workflow** (branch `devops`). The first run takes about 30-40 minutes. When it finishes, the run summary shows the site URL; the load balancer can need another 3-5 minutes before it answers.
 
-```hcl
-module "vpc" {
-  source = "git::https://github.com/wasim0028/yt-viewer-tracker.git//deployment/terraform/modules/vpc?ref=v1.0.0"
-  # ...
-}
+**4. Check the Release workflow:** change a line in `frontend/` or `backend/`, push to `devops`, and watch Actions build the image, commit the new tag, and ArgoCD roll it out.
+
+**Your own `kubectl` access.** The cluster is created by the GitHub role, so your own IAM user is not automatically an admin of it. To run `kubectl` yourself, add an access entry for your user:
+
+```bash
+aws eks create-access-entry --cluster-name yt-viewer-tracker --principal-arn <your-iam-user-or-role-arn>
+aws eks associate-access-policy --cluster-name yt-viewer-tracker --principal-arn <your-iam-user-or-role-arn> \
+  --policy-arn arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy --access-scope type=cluster
+aws eks update-kubeconfig --name yt-viewer-tracker --region ap-south-1
 ```
+
+### Day to day
+
+- **Ship a change:** push to `devops`. The Release workflow builds, tags with the commit ID, commits the tag, and ArgoCD deploys it. Roll back by reverting the tag commit.
+- **Stop paying:** run **Destroy infrastructure**. Run **Deploy infrastructure** again whenever you want it back.
+- A cold deploy can occasionally time out while Fargate pods start; re-running the workflow continues from where it stopped (Terraform and the add-on installs are safe to repeat).
+
+**Security note:** the deployer role has `AdministratorAccess`, because Terraform creates IAM roles, EKS and RDS. Anyone who can push to `devops` or run a workflow in the `production` environment can use it. Protect `devops` with branch protection, and add required reviewers to the environment if more than one person has write access.
+
+**Cost note:** the state bucket and lock table cost cents per month and stay after a destroy. The environment itself costs about $320-370 a month while it exists (see [Cost estimate](#cost-estimate)).
 
 ---
 
@@ -489,54 +595,87 @@ module "vpc" {
 
 Nothing sensitive is stored in this repository.
 
-| Value | Where it lives | Who sets it |
+| Value | Where it lives | Set by |
 |---|---|---|
-| RDS master password | Generated by Terraform | Nobody, it's automatic |
-| `DATABASE_URL` | Secrets Manager: `yt-viewer-tracker-production/database-url` | Terraform |
-| `YOUTUBE_API_KEY` | Secrets Manager: `yt-viewer-tracker-production/api-keys` | You (bootstrap step 4) |
-| `ADS_API_KEY` | Secrets Manager: `yt-viewer-tracker-production/api-keys` | You (optional) |
-| AWS access for CI | GitHub OIDC, no stored keys | n/a |
-| AWS access for pods | IRSA (IAM Roles for Service Accounts) | n/a |
+| RDS master password | Terraform state (generated, or `TF_VAR_db_password`) | Terraform / you |
+| `DATABASE_URL` | Secrets Manager `yt-viewer-tracker/database-url` | Terraform, automatically |
+| `YOUTUBE_API_KEY` | Secrets Manager `yt-viewer-tracker/api-keys` | You (`deploy.sh secrets`) |
+| `ADS_API_KEY` | Same secret | Placeholder; only used if you set `ADS_API_URL` |
+| AWS access for pods | IRSA: one IAM role per service account | n/a |
+
+External Secrets Operator copies both secrets into one Kubernetes Secret
+(`backend-secrets`) and refreshes it every hour.
 
 **Change the YouTube key later:**
 
 ```bash
-aws secretsmanager put-secret-value \
-  --secret-id yt-viewer-tracker-production/api-keys \
+aws secretsmanager put-secret-value --secret-id yt-viewer-tracker/api-keys \
   --secret-string '{"YOUTUBE_API_KEY":"new-key","ADS_API_KEY":"REPLACE_ME_VIA_AWS_CLI_NOT_TERRAFORM"}'
-
-# Sync now instead of waiting for the hourly refresh, then restart the backend
-kubectl annotate externalsecret backend-secrets -n yt-viewer-tracker \
-  force-sync=$(date +%s) --overwrite
+kubectl annotate externalsecret backend-secrets -n yt-viewer-tracker force-sync=$(date +%s) --overwrite
 kubectl rollout restart deployment backend -n yt-viewer-tracker
 ```
+
+The restart matters: the backend reads its settings once at startup, so it
+keeps the old key until the pod restarts.
+
+---
+
+## Terraform reference
+
+`deployment/terrafrom/main.tf` connects the modules; the modules contain no
+app-specific values.
+
+| Module | Creates |
+|---|---|
+| `vpc` | VPC, public and private subnets, NAT gateway, route tables, EKS subnet tags |
+| `eks-fargate` | EKS cluster, Fargate profiles, pod execution role with ECR pull access |
+| `rds-postgres` | Private encrypted PostgreSQL; your password or a generated one |
+| `ecr` | One immutable, scanned repository per image, with cleanup |
+| `app-secrets` | The two Secrets Manager secrets |
+| `irsa-role` | An IAM role exactly one Kubernetes service account can assume |
+| `github-oidc` | IAM roles GitHub Actions could use without stored AWS keys |
+| `prometheus` | Amazon Managed Prometheus workspace |
+
+Fargate profiles exist for `kube-system`, `external-secrets`, `argocd`,
+`aws-observability`, and the app namespace. Add more with
+`extra_fargate_namespaces`.
+
+**Outputs** (`terraform output`, read by `deploy.sh`): `eks_cluster_name`,
+`vpc_id`, `rds_endpoint`, `ecr_backend_repository_url`,
+`ecr_frontend_repository_url`, `api_keys_secret_name`,
+`database_url_secret_name`, `external_secrets_role_arn`,
+`adot_collector_role_arn`, `lb_controller_role_arn`,
+`github_actions_role_arn`, `amp_workspace_endpoint`, `tf_state_bucket`.
+
+**Kubernetes version.** Set by `eks_cluster_version` in `deployment/terrafrom/variables.tf` (default `1.35`). EKS supports each version for about 14 months, then charges extra for extended support and eventually upgrades the cluster for you. Check the [EKS version calendar](https://docs.aws.amazon.com/eks/latest/userguide/kubernetes-versions.html) every few months. On a running cluster, upgrade one minor version at a time (change the variable, `deploy.sh apply`), then restart the Fargate pods so they pick up the new kubelet: `kubectl rollout restart deployment -n yt-viewer-tracker` (and the same for the other namespaces).
+
+**Using the Terraform for another app:** copy `deployment/terrafrom`, change
+`local.name` in `main.tf` and the values in `terraform.tfvars`, give the VPC a
+different `cidr_block`, and set `create_github_oidc_provider = false` (an AWS
+account can have only one GitHub OIDC provider).
 
 ---
 
 ## Configuration reference
 
-Backend environment variables. In Kubernetes, the non-secret ones are set in
+Backend environment variables. In Kubernetes, the non-secret ones are in
 `deployment/k8s/base/backend-configmap.yaml`.
 
 | Variable | Default | Description |
 |---|---|---|
 | `YOUTUBE_API_KEY` | none | YouTube Data API v3 key (secret) |
 | `DATABASE_URL` | none | PostgreSQL connection string (secret) |
-| `PGSSL` | `false` | Set to `true` for RDS |
+| `PGSSL` | `false` locally, `true` in Compose and Kubernetes | Use SSL to connect (RDS expects it) |
 | `PORT` | `4000` | Backend HTTP port |
 | `POLL_INTERVAL_MS` | `180000` | How often viewer counts are read (3 min) |
 | `LIVE_LOOKUP_REFRESH_MS` | `3600000` | Scheduled stream discovery (1 h) |
 | `REACTIVE_REDISCOVER_COOLDOWN_MS` | `1800000` | Shortest gap between discoveries triggered by a stream ending |
-| `ADS_API_URL` / `ADS_API_KEY` | empty | Optional external ad API. If empty, ads come from `ads.json`. |
+| `ADS_API_URL`, `ADS_API_KEY` | empty | Optional external ad API; otherwise ads come from `backend/ads.json` |
 
-**Quota math.** Reading viewer counts costs 1 unit per call, for up to 50
-videos at a time. Discovery costs 100 units per channel each time it runs.
-With 2 channels, a 3-minute poll, and hourly discovery, that's about
-480 + 4,800 = 5,280 of the 10,000 daily units.
-
-> **Keep the backend at `replicas: 1`.** The poller's cache lives in the
-> process's memory. Each extra replica polls YouTube on its own, which
-> multiplies quota use and writes duplicate readings.
+**Quota math:** reading viewer counts costs 1 unit per call (up to 50 videos
+per call); discovery costs 100 units per channel per run. With 2 channels, a
+3-minute poll, and hourly discovery: about 480 + 4,800 = 5,280 of the 10,000
+daily units.
 
 ---
 
@@ -545,82 +684,129 @@ With 2 channels, a 3-minute poll, and hourly discovery, that's about
 | What | Where |
 |---|---|
 | Container logs | CloudWatch Logs, group `/aws/eks/yt-viewer-tracker-production/fargate` |
-| Metrics | Amazon Managed Prometheus (`terraform output amp_workspace_query_endpoint`) |
-| Health endpoints | Frontend `/health`, backend `/healthz` |
+| Metrics | Amazon Managed Prometheus; point Grafana at its query endpoint |
+| Health | Frontend `/health`, backend `/healthz` |
 | Raw metrics | Backend `/metrics` (Prometheus format) |
 
 Fargate can't run DaemonSets or attach EBS volumes, so a self-hosted
-Prometheus or a CloudWatch agent DaemonSet won't work here. Logs go through
-Fargate's built-in Fluent Bit, and metrics go through an ADOT Collector
-Deployment that sends them to Amazon Managed Prometheus. To build dashboards,
-point Grafana at the query endpoint above.
+Prometheus or a CloudWatch agent isn't an option. Logs go through Fargate's
+built-in Fluent Bit; metrics go through an ADOT Collector Deployment.
+
+---
+
+## Limitations and next steps
+
+- **Releases are automatic only on `devops`.** Pushes to other branches build nothing. For the manual route see *Deploying changes*.
+- **Terraform state is in S3** (versioned, encrypted, locked with DynamoDB), created by `bootstrap.sh`. It contains your database password, so keep access to that bucket tight. Deleting the bucket or lock table by hand loses track of what Terraform built.
+- **HTTP only.** For HTTPS, request an ACM certificate and enable the commented annotations in `deployment/k8s/base/ingress.yaml`.
+- **Single-AZ database, no deletion protection.** Set `db_multi_az = true` for a standby; the final snapshot on destroy is the only safeguard against accidental deletion.
 
 ---
 
 ## Troubleshooting
 
-| Symptom | Likely cause and fix |
+| Symptom | Cause and fix |
 |---|---|
-| Ingress `ADDRESS` stays empty | The ALB can take 3–5 minutes. If it's still empty, check the controller's logs: `kubectl logs -n kube-system deploy/aws-load-balancer-controller`. Permission errors there usually mean the `aws-load-balancer-controller` service account is missing its `eks.amazonaws.com/role-arn` annotation. |
-| Pods stuck in `Pending` | No Fargate profile covers that namespace. Profiles exist for `kube-system`, `yt-viewer-tracker`, `external-secrets`, `argocd`, and `aws-observability`. |
-| CoreDNS `Pending`, DNS failures | Bootstrap step 3 didn't finish. Re-run the script. |
-| `ImagePullBackOff` | CI hasn't pushed an image yet, or `kustomization.yaml` still has `REPLACE_WITH_ECR_*` placeholders |
-| `CreateContainerConfigError` on the backend | The `backend-secrets` Secret doesn't exist yet. Check `kubectl describe externalsecret backend-secrets -n yt-viewer-tracker`. |
-| `no matches for kind "ExternalSecret" in version "external-secrets.io/v1beta1"` | Newer External Secrets Operator releases use `external-secrets.io/v1`. Update `apiVersion` in `external-secret.yaml` and `cluster-secret-store.yaml`. |
-| Backend restarting, `/healthz` failing | Usually it can't connect to the database. Check `kubectl logs deploy/backend -n yt-viewer-tracker`. |
-| `403 quotaExceeded` in the backend logs | The daily YouTube quota is used up. Pin more `videoIds`, or raise `LIVE_LOOKUP_REFRESH_MS`. |
-| Viewer total slowly drops between discoveries | Streams that end are removed, and new ones are picked up at the next discovery. A drop triggers discovery automatically (subject to the cooldown). |
-| ArgoCD: "app path does not exist" | `path` in `argocd/application.yaml` must be `deployment/k8s/base` |
-| GitHub Actions: "Not authorized to perform sts:AssumeRoleWithWebIdentity" | `github_repo` in Terraform doesn't match your repo, or the push wasn't to `main` |
+| Pods `ImagePullBackOff` or `InvalidImageName` | `kustomization.yaml` in git still has `REPLACE_WITH_ECR_*` placeholders or an unpushed tag. Run `deploy.sh push`, commit the file, push to `devops`. |
+| Backend `CreateContainerConfigError` | The `backend-secrets` Secret doesn't exist. Run `kubectl describe externalsecret backend-secrets -n yt-viewer-tracker`. Usually the role ARN in `external-secrets-sa.yaml` wasn't committed (re-run `deploy.sh configure`), or the API key was never set (`deploy.sh secrets`). |
+| Ingress has no `ADDRESS` | Wait 3–5 minutes, then check `kubectl logs -n kube-system deploy/aws-load-balancer-controller`. Permission errors mean the controller is missing its IAM role: re-run `deploy.sh addons`. |
+| Pods stuck `Pending` | No Fargate profile covers that namespace (see *Terraform reference*). |
+| ArgoCD stays `OutOfSync` or can't find files | It reads the branch in `targetRevision`. Make sure that is `devops` in both Application files and that your commits are pushed to it. |
+| `deploy.sh addons`: `coredns ... exceeded its progress deadline` | CoreDNS predates the Fargate profile. Patch and restart it (commands in Step 6), then re-run `addons`. |
+| `deploy.sh argocd`: `no matches for kind "Application"` | ArgoCD isn't installed yet. Run `deploy.sh addons` first and check `kubectl get crd \| grep argoproj`. |
+| `kubectl apply` of ArgoCD: `metadata.annotations: Too long` | Use `kubectl apply --server-side` (`deploy.sh addons` already does). |
+| ArgoCD sync error `failed calling webhook ... x509: certificate is valid for ip-...compute.internal` | The External Secrets webhook defaults to port 10250, which on Fargate is the kubelet's port. Install it with `--set webhook.port=9443` (set in the `deploy.sh` provided with this README; add it to the `helm upgrade --install external-secrets` line if yours lacks it), or fix a running cluster with `helm upgrade external-secrets external-secrets/external-secrets -n external-secrets --reuse-values --set webhook.port=9443`. |
+| ExternalSecret `SecretSyncedError`: `unable to unmarshal secret ... invalid character 'p'` | `database-url` is a plain string, not JSON. In `external-secret.yaml`, read it under `spec.data` (`secretKey: DATABASE_URL`) and only `api-keys` under `spec.dataFrom`. Both lists sit directly under `spec`, not under `target`. |
+| Backend pod `0/1 Running`, restarting; `/healthz` returns 404 | `backend/server.js` lacks the `/healthz` and `/metrics` routes the probes and ADOT collector use. Add them, rebuild (`deploy.sh build`, `push`), commit the new tag. |
+| `destroy` fails: `RepositoryNotEmptyException` on ECR | The repositories still hold images. Empty them (`aws ecr batch-delete-image` on each, or delete the images in the console) and run `deploy.sh destroy` again. |
+| `State bucket '...' not found. Run bootstrap.sh once first` | The remote state hasn't been created in this AWS account. Run `./deployment/scripts/bootstrap.sh`. |
+| Workflow: `Could not assume role with OIDC` / `Not authorized to perform sts:AssumeRoleWithWebIdentity` | `AWS_ROLE_ARN` is wrong or missing, the job isn't in the `production` environment, or the repo name given to `bootstrap.sh` differs from your GitHub repo (re-run it with `GITHUB_REPO=owner/name`). |
+| Workflow: `Not authorized to perform sts:AssumeRoleWithWebIdentity` even though the role ARN and trust policy look right | GitHub now puts numeric IDs in the token subject (`repo:owner@<id>/name@<id>:environment:production`). The trust policy must list that form. Re-run `bootstrap.sh` from this repo (it looks the IDs up and accepts both forms), or set `GITHUB_OWNER_ID` and `GITHUB_REPO_ID` yourself. To see what GitHub sends, print the OIDC token's `sub` in a temporary workflow step. |
+| Workflow can't push the tag commit (`403` / `protected branch`) | Enable *Read and write permissions* under Settings, Actions, General. If `devops` is protected, allow the Actions bot to push, or use a PAT. |
+| Workflow step fails with `Permission denied` or `bad interpreter` on a script | The script lost its executable bit, has no `#!/usr/bin/env bash` first line, or has Windows line endings. Run the commands in *One-time setup, step 0*, commit and push. |
+| `Run workflow` button missing | The workflow file isn't on the default branch. Push it to `devops` and make sure `devops` is the default branch under Settings, Branches. |
+| `terraform.tfstate` shows up in `git status` | Add `*.tfstate*` to `.gitignore`. If it was ever committed, run `git rm --cached` on it and treat the database password as exposed: set a new `DB_PASSWORD` secret before the next deploy. |
+| `exec format error` in pod logs | Images were built on an ARM machine. EKS Fargate runs x86: build on an Intel/AMD machine. |
+| `403 quotaExceeded` in backend logs | The daily YouTube quota is used up. Pin more `videoIds`, or raise `LIVE_LOOKUP_REFRESH_MS`. |
+| Compose: backend can't connect to the database | A timeout means the network path is blocked (RDS security group, VPC). An authentication error usually means an un-encoded special character in the password. `database "..." does not exist` means the name at the end of the URL isn't on that server. |
+| `deploy.sh: $'\r': command not found` | The script has Windows line endings. Run `sed -i 's/\r$//' deployment/scripts/deploy.sh`, and run `git config core.autocrlf input` on the Windows machine. |
+| After `destroy`: "secret ... already scheduled for deletion" | Secrets Manager keeps deleted secrets for 7 days. Wait, or for each of `yt-viewer-tracker/api-keys` and `yt-viewer-tracker/database-url` run `aws secretsmanager restore-secret --secret-id <name>` and then `aws secretsmanager delete-secret --secret-id <name> --force-delete-without-recovery`. |
 
 ---
 
-## Tear down
+## Architecture decisions
 
-Do these in order. Skipping the first step is the most common reason
-`terraform destroy` hangs.
+- **Secrets come from Secrets Manager through External Secrets Operator, never from git.** A Secret manifest in a GitOps repo has to hold real values, and hand-made Secrets must be redone for every new cluster. Here, Terraform writes `DATABASE_URL`, you write the API key once, and the cluster keeps itself in sync.
+- **Two secrets, not one.** `database-url` is owned by Terraform and updates when the password changes. `api-keys` is yours, and Terraform never touches it after creation (`ignore_changes`).
+- **The backend runs exactly 1 replica, on purpose.** The poller's discovery cache lives in process memory. A second replica would poll YouTube independently, doubling quota use and writing duplicate readings. Scaling the API separately needs the poller split into its own process.
+- **Images are tagged with the commit ID, and ECR tags are immutable.** A tag always means one exact build, and rollback is a `git revert`. There is no `:latest`.
+- **`/healthz` doesn't check the database.** A brief database problem shouldn't make Kubernetes kill a healthy process.
+- **Fargate instead of EC2 nodes:** nothing to patch or scale. The cost: every pod is billed on its own, including the system pods.
+- **One NAT gateway, not one per AZ.** It saves about $35 a month; if its AZ goes down, the others lose outbound internet until it recovers.
+- **App of apps.** `root-app.yaml` is the only Application applied by hand. A new service is a file in `argocd/apps/`.
+
+---
+
+## Cost estimate
+
+Approximate monthly cost in `ap-south-1`, before tax, light traffic. Check the
+[AWS Pricing Calculator](https://calculator.aws/) for current prices.
+
+**EKS deployment**
+
+| Resource | Spec | USD / month |
+|---|---|---|
+| EKS control plane | 1 cluster | ~$73 |
+| Fargate pods | app + system pods | ~$160–180 |
+| RDS PostgreSQL | db.t4g.micro, 20 GB, single-AZ | ~$15–20 |
+| NAT gateway | 1, plus data | ~$35–45 |
+| Application Load Balancer | 1 | ~$20–25 |
+| Public IPv4 addresses, Secrets Manager, ECR, Prometheus, logs | | ~$15–25 |
+| **Total** | | **~$320–370** |
+
+**One EC2 instance with Docker Compose and an existing RDS**
+
+| Resource | Spec | USD / month |
+|---|---|---|
+| EC2 | t3.small / t3.medium | ~$15–17 / ~$30–35 |
+| EBS | 30 GB gp3 | ~$3 |
+| Public IPv4 address | 1 | ~$4 |
+| RDS PostgreSQL | db.t4g.micro | ~$15–20 |
+| **Total** | | **~$40–65** |
+
+---
+
+## Teardown
+
+With GitHub Actions: **Actions, Destroy infrastructure, Run workflow**, type `destroy`. By hand:
 
 ```bash
-# 1. Delete the Ingress first. The ALB was created by the controller, not by
-#    Terraform, and while it exists the VPC can't be deleted.
-kubectl delete -f argocd/application.yaml
-kubectl delete ingress --all -n yt-viewer-tracker
-# Wait until the load balancer is gone from the EC2 → Load Balancers console.
-
-# 2. Empty the ECR repositories (Terraform won't delete repos that contain images)
-for repo in yt-viewer-tracker-backend yt-viewer-tracker-frontend; do
-  ids=$(aws ecr list-images --repository-name "$repo" --query 'imageIds[*]' --output json)
-  [ "$ids" != "[]" ] && aws ecr batch-delete-image --repository-name "$repo" --image-ids "$ids"
-done
-
-# 3. Destroy everything else
-cd deployment/terraform/environments/production
-terraform destroy
+./deployment/scripts/deploy.sh destroy
 ```
 
-RDS takes a final snapshot (`yt-viewer-tracker-production-db-final-snapshot`)
-before it's deleted. Delete the snapshot by hand if you don't need it, since it
-keeps costing storage.
+**Use this, not a plain `terraform destroy`.** The load balancer is created by
+the Load Balancer Controller, outside Terraform, and while it exists the VPC
+can't be deleted: a plain destroy hangs and then fails. `destroy` deletes the
+ArgoCD apps and the Ingress first, waits until the load balancer is really
+gone, empties the ECR repositories, and only then runs Terraform. State is in S3, so you can run it from any machine with admin access.
 
-Deleted secrets stay recoverable for 7 days (`recovery_window_in_days` in the
-`app-secrets` module). Running `terraform apply` again within that window fails
-because the secret names are still reserved. Restore them, or wait out the window.
+RDS keeps a final snapshot, `yt-viewer-tracker-db-final-snapshot`. Delete it by
+hand if you don't need it, since it keeps costing storage. A second `destroy`
+fails while that snapshot name exists.
 
 ---
 
 ## Contributing
 
-1. Fork the repo and create a branch: `git checkout -b feature/my-change`
-2. Run the app locally (Part 1) and check your change
-3. Commit with a clear message and open a pull request against `main`
-
-Only pushes to `main` deploy. Pull requests can't assume the AWS role.
+1. Create a branch: `git checkout -b feature/my-change`
+2. Run it locally and check your change
+3. Open a pull request against `devops`
 
 ## License
 
-Add a `LICENSE` file to state how others may use this code. Until you do, the
+Add a `LICENSE` file to say how others may use this code. Until then, the
 default is "all rights reserved".
 
 ## Author
 
-**Wasim** · [@wasim0028](https://github.com/wasim0028)
+**Md Wasim Akram** · [@wasim0028](https://github.com/wasim0028)
