@@ -33,15 +33,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Show OIDC claims (temporary)
-        run: |
-          T=$(curl -s -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-              "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | jq -r .value)
-          echo "$T" | cut -d. -f2 | tr '_-' '/+' | base64 -d 2>/dev/null | jq '{sub,aud,repository}'
-          echo "role var length: ${#ROLE}"; echo "role var: [$ROLE]"
-        env:
-          ROLE: ${{ vars.AWS_ROLE_ARN }}
-
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
