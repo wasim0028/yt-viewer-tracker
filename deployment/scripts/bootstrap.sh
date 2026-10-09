@@ -1,12 +1,27 @@
 #!/usr/bin/env bash
 #
-# Bootstraps the entire yt-viewer-tracker cluster from scratch:
-# Terraform apply -> kubectl config -> CoreDNS Fargate patch -> cluster
-# add-ons (ESO, ALB Controller, ArgoCD) -> placeholder substitution ->
-# ArgoCD Application.
+# bootstrap.sh - ONE-TIME setup so GitHub Actions can deploy for you.
 #
-# Idempotent: safe to re-run. Each step checks whether its work is already
-# done before doing it again, rather than blindly re-applying everything.
+#   ./deployment/scripts/bootstrap.sh
+#
+# Run it once per AWS account, with admin credentials (your own aws configure
+# login, or CloudShell). It creates the things the main Terraform must NOT
+# own, because a destroy would otherwise delete the very state and role the
+# destroy is running with:
+#
+#   1. S3 bucket   <app>-tfstate-<account id>   Terraform state (versioned, private, encrypted)
+#   2. DynamoDB    <app>-tf-locks               state locking
+#   3. IAM OIDC provider for GitHub Actions     (skipped if it already exists)
+#   4. IAM role    <app>-gha-deployer           what the workflows assume; no stored AWS keys
+#
+# It is safe to run again: existing pieces are left alone.
+#
+# Environment variables
+#   GITHUB_REPO=owner/name   default: wasim0028/yt-viewer-tracker
+#   GITHUB_ENV_NAME=name     GitHub Environment the workflows use (default: production)
+#   GITHUB_OWNER_ID / GITHUB_REPO_ID   numeric ids (found automatically for public repos)
+#   AWS_REGION=...           default: ap-south-1
+#   APP_NAME=...             default: yt-viewer-tracker
 
 set -euo pipefail
 
@@ -70,6 +85,24 @@ fi
 
 # 4. Deployer role -----------------------------------------------------------
 # Only jobs of THIS repo that run in the named GitHub Environment can assume it.
+# GitHub now puts numeric IDs into the token subject
+# (repo:owner@<owner id>/name@<repo id>:environment:x). Both forms are accepted.
+# IDs come from GITHUB_OWNER_ID / GITHUB_REPO_ID, or from the GitHub API.
+OWNER="${GITHUB_REPO%%/*}"; NAME="${GITHUB_REPO##*/}"
+if [[ -z "${GITHUB_OWNER_ID:-}" || -z "${GITHUB_REPO_ID:-}" ]] \
+   && command -v curl >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  J="$(curl -fsS "https://api.github.com/repos/${GITHUB_REPO}" 2>/dev/null || true)"
+  GITHUB_OWNER_ID="$(printf '%s' "$J" | jq -r '.owner.id // empty' 2>/dev/null || true)"
+  GITHUB_REPO_ID="$(printf '%s' "$J" | jq -r '.id // empty' 2>/dev/null || true)"
+fi
+SUBS="\"repo:${GITHUB_REPO}:environment:${GITHUB_ENV_NAME}\""
+if [[ -n "${GITHUB_OWNER_ID:-}" && -n "${GITHUB_REPO_ID:-}" ]]; then
+  SUBS="${SUBS}, \"repo:${OWNER}@${GITHUB_OWNER_ID}/${NAME}@${GITHUB_REPO_ID}:environment:${GITHUB_ENV_NAME}\""
+  say "repo ids: owner ${GITHUB_OWNER_ID}, repo ${GITHUB_REPO_ID}"
+else
+  say "WARNING: could not look up the repo ids. If sign-in fails with 'Not authorized', re-run with"
+  say "         GITHUB_OWNER_ID=<id> GITHUB_REPO_ID=<id> (the workflow's OIDC claims show them in the sub)."
+fi
 TRUST="$(cat <<JSON
 {
   "Version": "2012-10-17",
@@ -80,7 +113,7 @@ TRUST="$(cat <<JSON
     "Condition": {
       "StringEquals": {
         "${OIDC_URL}:aud": "sts.amazonaws.com",
-        "${OIDC_URL}:sub": "repo:${GITHUB_REPO}:environment:${GITHUB_ENV_NAME}"
+        "${OIDC_URL}:sub": [ ${SUBS} ]
       }
     }
   }]
