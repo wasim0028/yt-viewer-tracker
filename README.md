@@ -66,7 +66,7 @@ and history for any date range.
 │  │  │  [backend x1]   Node.js API + YouTube poller             │  │  │
 │  │  │  [adot-collector]  scrapes /metrics → Managed Prometheus │  │  │
 │  │  └──────────────────────────────────────────────────────────┘  │  │
-│  │  argocd            watches this repo (branch devops), auto-sync │  │
+│  │  argocd            watches this repo (branch devops), auto-sync│  │
 │  │  external-secrets  Secrets Manager → Kubernetes Secret         │  │
 │  │  kube-system       AWS Load Balancer Controller, CoreDNS       │  │
 │  └─────────────────────────────┬──────────────────────────────────┘  │
@@ -297,8 +297,10 @@ sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
 # 4. Helm
 curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
 
-# 5. Docker Engine (official install script; on Amazon Linux see the EC2 section above)
-curl -fsSL https://get.docker.com | sudo sh && sudo usermod -aG docker "$USER"   # then log out and back in
+# 5. sudo wget https://raw.githubusercontent.com/lerndevops/labs/master/scripts/installDocker.sh -P /tmp
+sudo chmod 755 /tmp/installDocker.sh
+sudo bash /tmp/installDocker.sh
+sudo sh && sudo usermod -aG docker "$USER"   # then log out and back in
 
 # 6. kustomize (standalone binary, NOT snap: snap's sandbox blocks access to
 #    paths outside $HOME and fails with confusing "permission denied" errors)
