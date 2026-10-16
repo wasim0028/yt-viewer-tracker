@@ -1,0 +1,104 @@
+# CI checks: run on every pull request, and called by release.yml before any
+# image is built. If a check fails, nothing is built or deployed.
+#
+#   backend    syntax check, unit tests, npm audit (production deps)
+#   frontend   production build (catches compile errors), npm audit
+#   manifests  kustomize build + schema validation of every Kubernetes object,
+#              plus a Trivy misconfiguration report (report only)
+#   terraform  terraform validate (fmt is reported, not enforced)
+name: CI
+
+on:
+  pull_request:
+    branches: [devops]
+  workflow_call:        # release.yml runs these same checks first
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - run: npm ci
+      - name: Syntax check
+        run: npm run check
+      - name: Unit tests
+        run: npm test
+      - name: Dependency audit (fails on high or critical)
+        run: npm audit --omit=dev --audit-level=high
+
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - name: Production build
+        run: npm run build
+      - name: Dependency audit (fails on high or critical)
+        run: npm audit --omit=dev --audit-level=high
+
+  manifests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      KUSTOMIZE_VERSION: 5.4.3
+      KUBECONFORM_VERSION: 0.6.7
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install kustomize and kubeconform
+        run: |
+          curl -sSfL "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv${KUSTOMIZE_VERSION}/kustomize_v${KUSTOMIZE_VERSION}_linux_amd64.tar.gz" | tar xz
+          curl -sSfL "https://github.com/yannh/kubeconform/releases/download/v${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" | tar xz
+          sudo mv kustomize kubeconform /usr/local/bin/
+      - name: Render manifests
+        run: kustomize build deployment/k8s/base > rendered.yaml
+      - name: Validate against Kubernetes schemas
+        # CRDs (ExternalSecret, ClusterSecretStore) have no built-in schema:
+        # they are skipped rather than failing the check.
+        run: kubeconform -strict -summary -ignore-missing-schemas rendered.yaml
+      - name: Validate the ArgoCD Applications are well-formed YAML
+        run: kubeconform -summary -ignore-missing-schemas argocd/root-app.yaml argocd/apps/
+      - name: Misconfiguration report (Trivy, report only)
+        run: |
+          docker run --rm -v "$PWD:/src" -e TRIVY_DB_REPOSITORY=public.ecr.aws/aquasecurity/trivy-db \
+            aquasec/trivy:0.58.1 config --exit-code 0 --severity HIGH,CRITICAL /src/deployment
+
+  terraform:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: deployment/terrafrom
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.8
+          terraform_wrapper: false
+      - name: Format (reported, not enforced)
+        run: terraform fmt -check -recursive -diff || echo "::warning::Run 'terraform fmt -recursive' in deployment/terrafrom"
+      - name: Init without the S3 backend (no AWS access needed)
+        run: terraform init -backend=false -input=false
+      - name: Validate
+        run: terraform validate

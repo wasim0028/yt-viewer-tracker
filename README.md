@@ -101,7 +101,7 @@ and history for any date range.
 ├── argocd/
 │   ├── root-app.yaml              "app of apps", applied once
 │   └── apps/yt-viewer-tracker.yaml
-├── .github/workflows/             deploy.yml, destroy.yml, release.yml (GitHub Actions)
+├── .github/workflows/             ci.yml, release.yml, deploy.yml, destroy.yml (GitHub Actions)
 ├── .gitignore                     keeps Terraform state, .env, node_modules out of git
 └── deployment/
     ├── docker/
@@ -504,6 +504,7 @@ With [GitHub Actions](#4-one-click-deploy-and-cicd-github-actions) set up, pushi
 ```bash
 git add -A && git commit -m "Your change"
 ./deployment/scripts/deploy.sh build
+./deployment/scripts/deploy.sh scan     # optional: Trivy, fails on fixable CRITICAL findings
 ./deployment/scripts/deploy.sh push
 git add deployment/k8s/base && git commit -m "Deploy new image" && git push origin devops
 ```
@@ -516,13 +517,28 @@ images of each repository.
 
 ## 4. One-click deploy and CI/CD (GitHub Actions)
 
-Three workflows in `.github/workflows/` drive the same `deploy.sh` commands from GitHub. They sign in to AWS with OIDC, so **no AWS keys are stored anywhere**.
+Four workflows in `.github/workflows/` drive the same `deploy.sh` commands from GitHub. The AWS ones sign in with OIDC, so **no AWS keys are stored anywhere**.
 
 | Workflow | Starts when | What it does |
 |---|---|---|
+| **CI** (`ci.yml`) | Every pull request to `devops`, and first thing in every Release | Checks only, no AWS access. See *What CI checks* below. |
+
 | **Deploy infrastructure** (`deploy.yml`) | You click *Run workflow* | Builds everything: VPC, EKS, RDS, add-ons, images, ArgoCD. About 30-40 minutes. Prints the site URL in the run summary. |
-| **Release** (`release.yml`) | Push to `devops` that changes `backend/`, `frontend/` or `deployment/docker/` | Builds and pushes new images, commits the new tag, ArgoCD rolls it out. Does nothing if the cluster isn't deployed. |
+| **Release** (`release.yml`) | Push to `devops` that changes `backend/`, `frontend/` or `deployment/docker/` | Runs CI, builds the images, scans them with Trivy, pushes them, commits the new tag, and ArgoCD rolls it out. Any failed check stops it before anything is pushed. Does nothing if the cluster isn't deployed. |
 | **Destroy infrastructure** (`destroy.yml`) | You click *Run workflow* and type `destroy` | Removes the load balancer, empties ECR, destroys everything, and frees the secret names so you can redeploy at once. Tick the box to also delete the final DB snapshot. |
+
+### What CI checks
+
+| Job | Checks | Fails the run when |
+|---|---|---|
+| backend | `npm run check` (syntax), `npm test` (unit tests in `backend/test/`, Node's built-in test runner), `npm audit --omit=dev` | A test fails, or a production dependency has a high or critical advisory |
+| frontend | `npm run build`, `npm audit --omit=dev` | The app doesn't compile, or a high or critical advisory |
+| manifests | `kustomize build`, then `kubeconform` validates every object against the Kubernetes schemas; Trivy misconfiguration report | Broken YAML, a mistyped field, or a kustomization that doesn't build (Trivy only reports) |
+| terraform | `terraform init -backend=false` + `terraform validate`; `fmt` reported as a warning | Invalid Terraform |
+| image scan (Release and Deploy only) | `deploy.sh scan`: Trivy on both built images | A **fixable** CRITICAL vulnerability. Set `SCAN_FAIL_ON=HIGH,CRITICAL` to be stricter |
+
+The unit tests mock `fetch`, so they never call YouTube or need a database.
+Run them locally with `cd backend && npm test`.
 
 ### One-time setup (about 10 minutes)
 
@@ -661,7 +677,12 @@ account can have only one GitHub OIDC provider).
 ## Configuration reference
 
 Backend environment variables. In Kubernetes, the non-secret ones are in
-`deployment/k8s/base/backend-configmap.yaml`.
+`deployment/k8s/base/backend-config.env`. Kustomize's `configMapGenerator`
+turns that file into a ConfigMap whose name ends in a hash of its contents
+(for example `backend-config-8g4fgb486c`). Change a value, commit and push:
+the name changes, the Deployment's reference changes with it, and Kubernetes
+rolls the backend pods with the new values. No manual restart is needed, and
+ArgoCD removes the old ConfigMap afterwards.
 
 | Variable | Default | Description |
 |---|---|---|
@@ -686,13 +707,82 @@ daily units.
 | What | Where |
 |---|---|
 | Container logs | CloudWatch Logs, group `/aws/eks/yt-viewer-tracker-production/fargate` |
-| Metrics | Amazon Managed Prometheus; point Grafana at its query endpoint |
+| Metrics | Amazon Managed Prometheus, viewed in the self-hosted Grafana below |
 | Health | Frontend `/health`, backend `/healthz` |
 | Raw metrics | Backend `/metrics` (Prometheus format) |
 
 Fargate can't run DaemonSets or attach EBS volumes, so a self-hosted
 Prometheus or a CloudWatch agent isn't an option. Logs go through Fargate's
 built-in Fluent Bit; metrics go through an ADOT Collector Deployment.
+
+### Alerts (email)
+
+Prometheus alert rules run inside Amazon Managed Prometheus. Its Alertmanager
+publishes to an SNS topic, which emails you (`deployment/terrafrom/alerts.tf`).
+
+| Alert | Fires when | Severity |
+|---|---|---|
+| `BackendDown` | No successful scrape for 3 minutes, or no metrics at all (also catches the ADOT collector being down) | critical |
+| `BackendHighMemory` | Memory above 200 MiB for 5 minutes (the limit is 256 MiB) | warning |
+| `BackendEventLoopLag` | Event loop p99 lag above 0.5 s for 5 minutes | warning |
+| `BackendCrashLooping` | More than 2 restarts in 30 minutes (a normal deploy is 1) | critical |
+
+**Turn on email:** add your address to `deployment/terrafrom/terraform.tfvars`
+and apply. Keeping it in the tfvars file (rather than an environment
+variable) means a local `apply` and the Deploy workflow agree, so neither one
+removes the other's subscription.
+
+```hcl
+alert_email = "you@example.com"
+```
+
+AWS sends one "Subscription Confirmation" email; click the link or nothing
+is delivered. Check the email path end to end:
+
+```bash
+aws sns publish --topic-arn "$(cd deployment/terrafrom && terraform output -raw alerts_topic_arn)" \
+  --subject "Viewer Watch test" --message "If you can read this, alert email works."
+```
+
+To see a real alert, pause ArgoCD's self-heal (on the root app first, or it
+puts the child app's settings straight back), scale the backend to zero, wait
+about 5 minutes for the `BackendDown` email, then turn the root app back on.
+It restores the child app from git, which then brings the backend back:
+
+```bash
+off='{"spec":{"syncPolicy":{"automated":null}}}'
+kubectl -n argocd patch application yt-viewer-tracker-root --type merge -p "$off"
+kubectl -n argocd patch application yt-viewer-tracker      --type merge -p "$off"
+kubectl -n yt-viewer-tracker scale deployment backend --replicas=0
+# ...email arrives, then:
+kubectl -n argocd patch application yt-viewer-tracker-root --type merge \
+  -p '{"spec":{"syncPolicy":{"automated":{"prune":true,"selfHeal":true}}}}'
+```
+
+### Grafana (dashboards)
+
+Amazon Managed Prometheus stores metrics but has no UI, so the cluster also
+runs a small self-hosted Grafana (`k8s/base/grafana.yaml`):
+
+- **Stateless.** The datasource and the *Viewer Watch - Backend* dashboard are
+  provisioned from ConfigMaps (dashboards as code), so the pod can be
+  replaced at any time.
+- **No stored AWS keys.** Grafana queries AMP with SigV4 using its own IRSA
+  role, which can only *query* the workspace (`grafana.tf`).
+- **Not public.** The service is ClusterIP only. The admin password is
+  generated by Terraform, kept in Secrets Manager
+  (`yt-viewer-tracker/grafana-admin`) and delivered by External Secrets.
+
+Open it with one command (prints the login, then tunnels port 3000):
+
+```bash
+./deployment/scripts/deploy.sh grafana     # then browse to http://localhost:3000
+```
+
+Panels use the default `prom-client` metrics (up, CPU, memory, heap, event-loop
+lag). To graph your own numbers, add a counter or gauge in `backend/server.js`
+and a panel in `k8s/base/grafana-dashboards.yaml`. Cost: one extra Fargate pod
+(0.25 vCPU / 0.5 GB), roughly $10-15 a month.
 
 ---
 
@@ -766,6 +856,7 @@ Approximate monthly cost in `ap-south-1`, before tax, light traffic. Check the
 | NAT gateway | 1, plus data | ~$35–45 |
 | Application Load Balancer | 1 | ~$20–25 |
 | Public IPv4 addresses, Secrets Manager, ECR, Prometheus, logs | | ~$15–25 |
+| Grafana pod | 0.25 vCPU / 0.5 GB | ~$10–15 |
 | **Total** | | **~$320–370** |
 
 **One EC2 instance with Docker Compose and an existing RDS**

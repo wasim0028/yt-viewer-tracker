@@ -77,9 +77,10 @@ jobs:
           git diff --cached --quiet || git commit -m "ci: set AWS identifiers [skip ci]"
           git push origin "HEAD:${GITHUB_REF_NAME}"
 
-      - name: Build and push images
+      - name: Build, scan (Trivy) and push images
         run: |
           ./deployment/scripts/deploy.sh build
+          ./deployment/scripts/deploy.sh scan
           ./deployment/scripts/deploy.sh push
 
       - name: Commit the new image tag

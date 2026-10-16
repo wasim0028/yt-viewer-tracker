@@ -1,0 +1,166 @@
+# Self-hosted Grafana on Fargate. Read-only viewer for the metrics that the
+# ADOT collector writes into Amazon Managed Prometheus (which has no UI).
+#
+# - Stateless: datasource and dashboards are provisioned from ConfigMaps, so
+#   the pod can be replaced at any time. Users/preferences made in the UI
+#   live on an emptyDir and are lost on restart (intentional).
+# - Auth to AMP uses SigV4 with the pod's IAM role (IRSA), no static keys.
+# - Admin password comes from Secrets Manager via External Secrets.
+# - ClusterIP only: nothing is exposed to the internet. Reach it with
+#   ./deployment/scripts/deploy.sh grafana
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: grafana
+  namespace: yt-viewer-tracker
+  annotations:
+    eks.amazonaws.com/role-arn: "REPLACE_WITH_TERRAFORM_OUTPUT_grafana_role_arn"
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: grafana-secrets
+  namespace: yt-viewer-tracker
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    name: aws-secrets-manager
+    kind: ClusterSecretStore
+  target:
+    name: grafana-secrets
+    creationPolicy: Owner
+  dataFrom:
+    - extract:
+        key: yt-viewer-tracker/grafana-admin
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-datasources
+  namespace: yt-viewer-tracker
+data:
+  datasources.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: Amazon Managed Prometheus
+        type: prometheus
+        uid: amp
+        access: proxy
+        isDefault: true
+        url: "REPLACE_WITH_TERRAFORM_OUTPUT_amp_workspace_endpoint"
+        jsonData:
+          httpMethod: POST
+          sigV4Auth: true
+          sigV4AuthType: default
+          sigV4Region: ap-south-1
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-provider
+  namespace: yt-viewer-tracker
+data:
+  provider.yaml: |
+    apiVersion: 1
+    providers:
+      - name: viewer-watch
+        type: file
+        disableDeletion: true
+        allowUiUpdates: false
+        options:
+          path: /var/lib/grafana-dashboards
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  namespace: yt-viewer-tracker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: grafana
+  template:
+    metadata:
+      labels:
+        app: grafana
+    spec:
+      serviceAccountName: grafana
+      securityContext:
+        runAsUser: 472 # the grafana user in the official image
+        runAsNonRoot: true
+        fsGroup: 472
+      containers:
+        - name: grafana
+          # Public ECR mirror: avoids Docker Hub's anonymous pull limits.
+          image: public.ecr.aws/grafana/grafana:11.6.0
+          ports:
+            - containerPort: 3000
+          env:
+            - name: GF_AUTH_SIGV4_AUTH_ENABLED # required for the SigV4 datasource option
+              value: "true"
+            - name: GF_AUTH_ANONYMOUS_ENABLED
+              value: "false"
+            - name: GF_USERS_ALLOW_SIGN_UP
+              value: "false"
+            - name: GF_ANALYTICS_REPORTING_ENABLED
+              value: "false"
+            - name: GF_ANALYTICS_CHECK_FOR_UPDATES
+              value: "false"
+            - name: GF_SECURITY_ADMIN_USER
+              value: admin
+          envFrom:
+            - secretRef:
+                name: grafana-secrets # provides GF_SECURITY_ADMIN_PASSWORD
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: 500m
+              memory: 1Gi
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/grafana
+            - name: datasources
+              mountPath: /etc/grafana/provisioning/datasources
+            - name: dashboard-provider
+              mountPath: /etc/grafana/provisioning/dashboards
+            - name: dashboards
+              mountPath: /var/lib/grafana-dashboards
+      volumes:
+        - name: data
+          emptyDir: {}
+        - name: datasources
+          configMap:
+            name: grafana-datasources
+        - name: dashboard-provider
+          configMap:
+            name: grafana-dashboard-provider
+        - name: dashboards
+          configMap:
+            name: grafana-dashboards
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+  namespace: yt-viewer-tracker
+spec:
+  selector:
+    app: grafana
+  ports:
+    - port: 3000
+      targetPort: 3000
