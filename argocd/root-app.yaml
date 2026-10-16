@@ -17,7 +17,7 @@ spec:
 
   source:
     repoURL: https://github.com/wasim0028/yt-viewer-tracker.git
-    targetRevision: devops
+    targetRevision: feature/ci-alerts-grafana
     path: argocd/apps
 
   destination:
