@@ -597,6 +597,30 @@ aws eks associate-access-policy --cluster-name yt-viewer-tracker --principal-arn
 aws eks update-kubeconfig --name yt-viewer-tracker --region ap-south-1
 ```
 
+### Branch protection on `devops`
+
+`devops` is what ArgoCD deploys, so it only changes through pull requests.
+A repository ruleset (**Settings → Rules → Rulesets → protect-devops**)
+enforces:
+
+- a pull request for every change (no approvals required, since there is one maintainer)
+- the four CI checks (`backend`, `frontend`, `manifests`, `terraform`) passing before merge
+- no force pushes and no deleting the branch
+
+Two actors may bypass it: repository admins (for emergencies), and **deploy
+keys**, which is how the pipeline pushes its own commits (new image tag, AWS
+identifiers). Set the key up once:
+
+```bash
+ssh-keygen -t ed25519 -N "" -C "yt-viewer-tracker-ci" -f ci_deploy_key
+cat ci_deploy_key.pub   # Settings → Deploy keys → Add deploy key, tick "Allow write access"
+cat ci_deploy_key       # Settings → Environments → production → Add secret, name DEPLOY_KEY
+rm ci_deploy_key ci_deploy_key.pub
+```
+
+Without it, Release and Deploy fail at their "Commit" step with
+`GH013: Repository rule violations`.
+
 ### Day to day
 
 - **Ship a change:** push to `devops`. The Release workflow builds, tags with the commit ID, commits the tag, and ArgoCD deploys it. Roll back by reverting the tag commit.
