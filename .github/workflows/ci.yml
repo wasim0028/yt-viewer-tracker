@@ -80,8 +80,9 @@ jobs:
       - name: Validate the ArgoCD Applications are well-formed YAML
         run: kubeconform -summary -ignore-missing-schemas argocd/root-app.yaml argocd/apps/
       - name: Misconfiguration report (Trivy, report only)
+        continue-on-error: true   # a report; a download hiccup must not fail CI
         run: |
-          docker run --rm -v "$PWD:/src" -e TRIVY_DB_REPOSITORY=public.ecr.aws/aquasecurity/trivy-db \
+          docker run --rm -v "$PWD:/src" \
             aquasec/trivy:0.58.1 config --exit-code 0 --severity HIGH,CRITICAL /src/deployment
 
   terraform:

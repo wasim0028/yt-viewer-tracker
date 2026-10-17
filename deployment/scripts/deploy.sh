@@ -265,15 +265,30 @@ scan_images() {
   section "Scanning images (Trivy)"
   local tag img
   tag="$(image_tag)"
+  # The vulnerability database is published to several registries, and each
+  # rate-limits anonymous downloads (public.ecr.aws answered TOOMANYREQUESTS
+  # from GitHub's shared runners). Trivy tries these in order.
+  local db_repos="${TRIVY_DB_REPOSITORY:-mirror.gcr.io/aquasec/trivy-db:2,ghcr.io/aquasecurity/trivy-db:2,public.ecr.aws/aquasecurity/trivy-db:2}"
   local -a trivy=(docker run --rm
     -v /var/run/docker.sock:/var/run/docker.sock
     -v "${HOME}/.cache/trivy:/root/.cache/trivy"
-    -e TRIVY_DB_REPOSITORY=public.ecr.aws/aquasecurity/trivy-db
+    -e "TRIVY_DB_REPOSITORY=${db_repos}"
     "${TRIVY_IMAGE:-aquasec/trivy:0.58.1}" image --no-progress)
   mkdir -p "${HOME}/.cache/trivy"
+
+  # Download the database once, so a mirror outage reads as what it is rather
+  # than as a failed scan, and the four scans below reuse the cached copy.
+  local attempt
+  for attempt in 1 2 3; do
+    "${trivy[@]}" --download-db-only && break
+    [[ $attempt == 3 ]] && error "Could not download the Trivy vulnerability database from any mirror (rate limited). Re-run in a few minutes."
+    warn "Trivy database download failed (attempt $attempt of 3); retrying in 30s"
+    sleep 30
+  done
+
   for img in "$(tf_out ecr_backend_repository_url):$tag" "$(tf_out ecr_frontend_repository_url):$tag"; do
-    "${trivy[@]}" --severity HIGH,CRITICAL --exit-code 0 "$img"
-    if ! "${trivy[@]}" --quiet --severity "${SCAN_FAIL_ON:-CRITICAL}" --ignore-unfixed --exit-code 1 --format table "$img" >/dev/null; then
+    "${trivy[@]}" --skip-db-update --severity HIGH,CRITICAL --exit-code 0 "$img"
+    if ! "${trivy[@]}" --skip-db-update --quiet --severity "${SCAN_FAIL_ON:-CRITICAL}" --ignore-unfixed --exit-code 1 --format table "$img" >/dev/null; then
       error "$img has fixable ${SCAN_FAIL_ON:-CRITICAL} vulnerabilities (listed above). Not pushing."
     fi
     log "$img passed (no fixable ${SCAN_FAIL_ON:-CRITICAL} findings)"
