@@ -14,7 +14,7 @@ metadata:
   name: grafana
   namespace: yt-viewer-tracker
   annotations:
-    eks.amazonaws.com/role-arn: "REPLACE_WITH_TERRAFORM_OUTPUT_grafana_role_arn"
+    eks.amazonaws.com/role-arn: "arn:aws:iam::326334468168:role/yt-viewer-tracker-grafana"
 ---
 apiVersion: external-secrets.io/v1
 kind: ExternalSecret
@@ -47,7 +47,7 @@ data:
         uid: amp
         access: proxy
         isDefault: true
-        url: "REPLACE_WITH_TERRAFORM_OUTPUT_amp_workspace_endpoint"
+        url: "https://aps-workspaces.ap-south-1.amazonaws.com/workspaces/ws-60f29c1d-25c9-4fe2-9d8c-11acbebc3b4d"
         jsonData:
           httpMethod: POST
           sigV4Auth: true

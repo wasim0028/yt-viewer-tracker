@@ -38,7 +38,7 @@ data:
 
     exporters:
       prometheusremotewrite:
-        endpoint: "https://aps-workspaces.ap-south-1.amazonaws.com/workspaces/ws-7e687abb-17d2-4679-a48c-b79141932a0b/api/v1/remote_write"
+        endpoint: "https://aps-workspaces.ap-south-1.amazonaws.com/workspaces/ws-60f29c1d-25c9-4fe2-9d8c-11acbebc3b4d/api/v1/remote_write"
         auth:
           authenticator: sigv4auth
 
