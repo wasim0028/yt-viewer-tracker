@@ -20,3 +20,8 @@ output "cluster_primary_security_group_id" {
   description = "Security group Fargate pods use; allow it into the database"
   value       = module.eks.cluster_primary_security_group_id
 }
+
+output "fargate_pod_execution_role_name" {
+  description = "Role Fargate uses to pull images and ship container logs"
+  value       = aws_iam_role.fargate_pod_execution.name
+}

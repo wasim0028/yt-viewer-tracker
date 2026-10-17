@@ -6,7 +6,6 @@ resources:
 - external-secrets-sa.yaml
 - cluster-secret-store.yaml
 - external-secret.yaml
-- backend-configmap.yaml
 - backend-deployment.yaml
 - backend-service.yaml
 - frontend-deployment.yaml
@@ -14,6 +13,22 @@ resources:
 - ingress.yaml
 - aws-logging-configmap.yaml
 - adot-collector.yaml
+- grafana.yaml
+- grafana-dashboards.yaml
+
+# The backend ConfigMap is generated, not hand-written. Kustomize appends a
+# hash of the contents to its name and updates every reference to it, so
+# changing backend-config.env changes the name, which changes the pod
+# template, which makes Kubernetes roll the pods. Without this, a changed
+# ConfigMap is updated in place but running pods keep the old values until
+# someone restarts them. ArgoCD prunes the old, unused ConfigMap afterwards.
+# "namespace" is set here (not at the top level) so the other namespaces in
+# this folder (external-secrets, aws-observability) are left alone.
+configMapGenerator:
+- envs:
+  - backend-config.env
+  name: backend-config
+  namespace: yt-viewer-tracker
 
 # GitHub Actions rewrites these after each build, via:
 #   kustomize edit set image backend-image=<ecr-url>:<tag> frontend-image=<ecr-url>:<tag>
@@ -25,7 +40,7 @@ resources:
 images:
 - name: backend-image
   newName: 326334468168.dkr.ecr.ap-south-1.amazonaws.com/yt-viewer-tracker-backend
-  newTag: 5bca9ca46a26
+  newTag: b54d03ad3bd4
 - name: frontend-image
   newName: 326334468168.dkr.ecr.ap-south-1.amazonaws.com/yt-viewer-tracker-frontend
-  newTag: 5bca9ca46a26
+  newTag: b54d03ad3bd4

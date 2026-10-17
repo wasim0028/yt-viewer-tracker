@@ -40,6 +40,7 @@ module "ecr" {
 
   name_prefix  = local.name
   repositories = var.ecr_repositories
+  force_delete = true # destroy must not fail because images are still in the repositories
 }
 
 module "rds" {
@@ -77,7 +78,7 @@ module "prometheus" {
 data "aws_iam_policy_document" "external_secrets" {
   statement {
     actions   = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"]
-    resources = module.app_secrets.secret_arns
+    resources = concat(module.app_secrets.secret_arns, [aws_secretsmanager_secret.grafana_admin.arn])
   }
 }
 

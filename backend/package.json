@@ -6,7 +6,9 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "node --watch server.js"
+    "dev": "node --watch server.js",
+    "test": "node --test",
+    "check": "node --check server.js && node --check db.js && node --check poller.js && node --check youtube.js && node --check ads.js"
   },
   "dependencies": {
     "cors": "^2.8.5",

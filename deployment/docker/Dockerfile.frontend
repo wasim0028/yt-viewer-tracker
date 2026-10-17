@@ -10,7 +10,12 @@ COPY frontend/. .
 
 RUN npm run build
 
-FROM nginx:1.27-alpine
+# stable-alpine: the maintained nginx line (1.27 was mainline and no longer
+# gets rebuilds). apk upgrade pulls Alpine security fixes released after the
+# base image was built; Trivy in CI fails the release on fixable CRITICALs.
+FROM nginx:stable-alpine
+
+RUN apk upgrade --no-cache
 
 RUN rm /etc/nginx/conf.d/default.conf
 

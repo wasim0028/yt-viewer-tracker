@@ -15,9 +15,11 @@
 #   configure    Write AWS role ARNs into the Kubernetes manifests,
 #                set (or print) the GitHub Actions variables
 #   build        Build both Docker images, tagged with the git commit
+#   scan         Trivy-scan both images; fails on fixable CRITICAL vulnerabilities
 #   push         Push them to ECR and point kustomization.yaml at them
 #   argocd       Apply argocd/root-app.yaml (app of apps)
 #   status       ArgoCD apps, pods, secrets, and the site URL
+#   grafana      Print the Grafana login and open it on http://localhost:3000
 #   destroy      Delete the load balancer first, empty ECR, then terraform destroy
 #   free-secrets Release Secrets Manager names still 'scheduled for deletion'
 #
@@ -30,6 +32,7 @@
 #   CONFIRM_DESTROY=destroy Skip the typed confirmation in 'destroy' (CI)
 #   SKIP_GH_VARS=1          'configure' won't try to set GitHub variables (CI)
 #   TF_STATE_BUCKET=...     Override the state bucket (default: yt-viewer-tracker-tfstate-<account id>)
+#   SCAN_FAIL_ON=CRITICAL   Severities that fail 'scan' (e.g. HIGH,CRITICAL to be stricter)
 
 set -euo pipefail
 IFS=$'\n\t'
@@ -189,10 +192,11 @@ set_api_keys() {
 configure_manifests() {
   require terraform
   section "Writing AWS identifiers into the manifests"
-  local eso_role adot_role amp
+  local eso_role adot_role amp grafana_role
   eso_role="$(tf_out external_secrets_role_arn)"
   adot_role="$(tf_out adot_collector_role_arn)"
   amp="$(tf_out amp_workspace_endpoint)"
+  grafana_role="$(tf_out grafana_role_arn)"
 
   # Replace the values (not just the placeholders), so re-running after a
   # rebuild with new ARNs updates them.
@@ -201,8 +205,13 @@ configure_manifests() {
     -e "s#(eks\.amazonaws\.com/role-arn:).*#\1 \"${adot_role}\"#" \
     -e "s#(endpoint:).*#\1 \"${amp}api/v1/remote_write\"#" \
     "$K8S_DIR/adot-collector.yaml"
+  # Grafana queries AMP: its URL is the workspace base (no trailing slash, no /api/...)
+  sed -i.bak -E \
+    -e "s#(eks\.amazonaws\.com/role-arn:).*#\1 \"${grafana_role}\"#" \
+    -e "s#^( *url:).*#\1 \"${amp%/}\"#" \
+    "$K8S_DIR/grafana.yaml"
   rm -f "$K8S_DIR"/*.bak
-  log "Updated external-secrets-sa.yaml and adot-collector.yaml"
+  log "Updated external-secrets-sa.yaml, adot-collector.yaml and grafana.yaml"
 
   local -a names=(AWS_ECR_PUSH_ROLE_ARN AWS_TERRAFORM_PLAN_ROLE_ARN AWS_TERRAFORM_APPLY_ROLE_ARN TF_STATE_BUCKET)
   local -a values=(
@@ -245,6 +254,45 @@ build_images() {
   docker build -f "$REPO_ROOT/deployment/docker/Dockerfile.frontend" \
     -t "$(tf_out ecr_frontend_repository_url):$tag" "$REPO_ROOT"
   log "Built backend and frontend, tag $tag"
+}
+
+# Scans the images 'build' just made, before 'push' sends them anywhere.
+# Trivy runs as a container (nothing to install). Prints HIGH and CRITICAL
+# findings, then fails only on fixable ones at SCAN_FAIL_ON severity, so an
+# unfixable base-image CVE cannot block every release.
+scan_images() {
+  require docker git terraform
+  section "Scanning images (Trivy)"
+  local tag img
+  tag="$(image_tag)"
+  # The vulnerability database is published to several registries, and each
+  # rate-limits anonymous downloads (public.ecr.aws answered TOOMANYREQUESTS
+  # from GitHub's shared runners). Trivy tries these in order.
+  local db_repos="${TRIVY_DB_REPOSITORY:-mirror.gcr.io/aquasec/trivy-db:2,ghcr.io/aquasecurity/trivy-db:2,public.ecr.aws/aquasecurity/trivy-db:2}"
+  local -a trivy=(docker run --rm
+    -v /var/run/docker.sock:/var/run/docker.sock
+    -v "${HOME}/.cache/trivy:/root/.cache/trivy"
+    -e "TRIVY_DB_REPOSITORY=${db_repos}"
+    "${TRIVY_IMAGE:-aquasec/trivy:0.58.1}" image --no-progress)
+  mkdir -p "${HOME}/.cache/trivy"
+
+  # Download the database once, so a mirror outage reads as what it is rather
+  # than as a failed scan, and the four scans below reuse the cached copy.
+  local attempt
+  for attempt in 1 2 3; do
+    "${trivy[@]}" --download-db-only && break
+    [[ $attempt == 3 ]] && error "Could not download the Trivy vulnerability database from any mirror (rate limited). Re-run in a few minutes."
+    warn "Trivy database download failed (attempt $attempt of 3); retrying in 30s"
+    sleep 30
+  done
+
+  for img in "$(tf_out ecr_backend_repository_url):$tag" "$(tf_out ecr_frontend_repository_url):$tag"; do
+    "${trivy[@]}" --skip-db-update --severity HIGH,CRITICAL --exit-code 0 "$img"
+    if ! "${trivy[@]}" --skip-db-update --quiet --severity "${SCAN_FAIL_ON:-CRITICAL}" --ignore-unfixed --exit-code 1 --format table "$img" >/dev/null; then
+      error "$img has fixable ${SCAN_FAIL_ON:-CRITICAL} vulnerabilities (listed above). Not pushing."
+    fi
+    log "$img passed (no fixable ${SCAN_FAIL_ON:-CRITICAL} findings)"
+  done
 }
 
 push_images() {
@@ -360,6 +408,21 @@ tf_destroy() {
   log "Destroyed. Secrets Manager keeps the deleted secrets for 7 days; redeploying sooner fails until you restore them."
 }
 
+# Grafana is not exposed to the internet (no public login page, no plain-HTTP
+# password). This reads the admin password from Secrets Manager and tunnels
+# port 3000 to your machine. Ctrl+C closes the tunnel.
+grafana() {
+  require kubectl aws
+  setup_kubectl
+  section "Grafana"
+  local pw
+  pw="$(aws secretsmanager get-secret-value --secret-id "${APP_NAME}/grafana-admin" \
+        --query SecretString --output text | python3 -c 'import sys,json; print(json.load(sys.stdin)["GF_SECURITY_ADMIN_PASSWORD"])')"
+  kubectl rollout status deployment/grafana -n "$APP_NAMESPACE" --timeout=300s
+  log "Open http://localhost:3000   user: admin   password: ${pw}"
+  kubectl port-forward -n "$APP_NAMESPACE" svc/grafana 3000:3000
+}
+
 # Secrets Manager keeps deleted secrets for 7 days and refuses to create a
 # secret with the same name meanwhile. Restore + force-delete frees the name.
 free_secrets() {
@@ -411,9 +474,11 @@ case "${1:-}" in
   secrets)     set_api_keys ;;
   configure)   configure_manifests ;;
   build)       build_images ;;
+  scan)        scan_images ;;
   push)        push_images ;;
   argocd)      argocd_apply ;;
   status)      status ;;
+  grafana)     grafana ;;
   destroy)     tf_destroy ;;
   free-secrets) free_secrets ;;
   ""|-h|--help|help) usage ;;
