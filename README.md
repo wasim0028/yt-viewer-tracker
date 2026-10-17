@@ -46,6 +46,62 @@ and history for any date range.
 
 ---
 
+## Screenshots
+
+Everything below is from the real deployment on EKS Fargate (ap-south-1).
+
+### The app
+
+![Live chart: two channels compared, summed across all their live streams](docs/screenshots/01-live-chart.png)
+
+*Live comparison chart. Each channel's viewers are summed across every live stream it is running.*
+
+| History, dark mode | History, light mode |
+|---|---|
+| ![History view in dark mode with a hover tooltip](docs/screenshots/02-history-dark.png) | ![History view in light mode](docs/screenshots/03-history-light.png) |
+
+### Running on EKS
+
+![All pods Running and both ArgoCD applications Synced and Healthy](docs/screenshots/04-pods-argocd-healthy.png)
+
+*Backend, two frontend replicas, the ADOT collector and Grafana are all `Running`. ArgoCD shows the root app and the app itself `Synced` and `Healthy`.*
+
+### CI/CD
+
+![Deploy workflow: every step green, including the Trivy scan](docs/screenshots/05-deploy-run-green.png)
+
+*One-click **Deploy infrastructure**: Terraform, add-ons, build, Trivy scan, push, commit the image tag, register with ArgoCD, wait for the site.*
+
+![Pull request with four required checks passing](docs/screenshots/06-pr-required-checks.png)
+
+*`devops` is protected. The pull request can only be merged after `backend`, `frontend`, `manifests` and `terraform` pass.*
+
+### Observability
+
+![Grafana dashboard Viewer Watch - Backend](docs/screenshots/07-grafana-dashboard.png)
+
+*Self-hosted Grafana reading Amazon Managed Prometheus: backend up, memory, uptime, file descriptors, CPU, heap and event-loop lag.*
+
+![CloudWatch Logs Insights showing the backend's Fargate logs](docs/screenshots/08-cloudwatch-fargate-logs.png)
+
+*Container logs from Fargate in CloudWatch Logs Insights (log group `/aws/eks/yt-viewer-tracker-production/fargate`).*
+
+![Email from AWS: BackendDown alert resolved](docs/screenshots/09-alert-resolved-email.png)
+
+*Alerting works end to end: a Prometheus rule fires, Alertmanager sends it to SNS, and SNS emails it. This one is the `[RESOLVED]` message after the backend came back.*
+
+### Config change rolls out by itself
+
+![Git diff of one value in backend-config.env](docs/screenshots/10-config-change-commit.png)
+
+*A one-line change to `backend-config.env` in git.*
+
+![kubectl after the sync: new ConfigMap hash and a freshly started pod](docs/screenshots/11-config-rollout.png)
+
+*After ArgoCD syncs, the ConfigMap has a new hashed name (`backend-config-<hash>`), so Kubernetes replaces the backend pod, and `printenv` inside it shows the new value. No manual restart.*
+
+---
+
 ## Architecture (EKS deployment)
 
 ```
@@ -621,6 +677,12 @@ rm ci_deploy_key ci_deploy_key.pub
 Without it, Release and Deploy fail at their "Commit" step with
 `GH013: Repository rule violations`.
 
+Also add **Deploy keys** to the ruleset's **Bypass list** (*Always allow*).
+The private key in `DEPLOY_KEY` must be the **pair** of the public key under
+Deploy keys. Check before running a workflow: the fingerprint printed by
+`ssh-keygen -lf <private-key-file>` must equal the `SHA256:...` GitHub shows
+next to the deploy key. Never paste or screenshot the private key.
+
 ### Day to day
 
 - **Ship a change:** push to `devops`. The Release workflow builds, tags with the commit ID, commits the tag, and ArgoCD deploys it. Roll back by reverting the tag commit.
@@ -843,6 +905,9 @@ and a panel in `k8s/base/grafana-dashboards.yaml`. Cost: one extra Fargate pod
 | Workflow: `Could not assume role with OIDC` / `Not authorized to perform sts:AssumeRoleWithWebIdentity` | `AWS_ROLE_ARN` is wrong or missing, the job isn't in the `production` environment, or the repo name given to `bootstrap.sh` differs from your GitHub repo (re-run it with `GITHUB_REPO=owner/name`). |
 | Workflow: `Not authorized to perform sts:AssumeRoleWithWebIdentity` even though the role ARN and trust policy look right | GitHub now puts numeric IDs in the token subject (`repo:owner@<id>/name@<id>:environment:production`). The trust policy must list that form. Re-run `bootstrap.sh` from this repo (it looks the IDs up and accepts both forms), or set `GITHUB_OWNER_ID` and `GITHUB_REPO_ID` yourself. To see what GitHub sends, print the OIDC token's `sub` in a temporary workflow step. |
 | Workflow can't push the tag commit (`403` / `protected branch`) | Enable *Read and write permissions* under Settings, Actions, General. If `devops` is protected, allow the Actions bot to push, or use a PAT. |
+| Release or Deploy fails at "Commit the new image tag": `GH013: Repository rule violations ... Changes must be made through a pull request` | The checkout used the default token (push URL starts with `https://`), so `DEPLOY_KEY` is missing or empty. Add it as an *environment* secret in `production` and add Deploy keys to the ruleset's bypass list (see *Branch protection*). |
+| Checkout fails with `git@github.com: Permission denied (publickey)` | The private key in `DEPLOY_KEY` isn't the pair of the public key under Deploy keys (often `ssh-keygen` was run twice and overwrote the file). Compare fingerprints with `ssh-keygen -lf`, regenerate one pair, and replace both halves. The public key needs *Allow write access*. |
+| Pull request shows required checks `Expected — Waiting for status to be reported` | The newest commit on the branch was made by the pipeline with `[skip ci]`, so CI never ran on it. Push any normal commit (or re-run CI) and the four checks report. |
 | Workflow step fails with `Permission denied` or `bad interpreter` on a script | The script lost its executable bit, has no `#!/usr/bin/env bash` first line, or has Windows line endings. Run the commands in *One-time setup, step 0*, commit and push. |
 | `Run workflow` button missing | The workflow file isn't on the default branch. Push it to `devops` and make sure `devops` is the default branch under Settings, Branches. |
 | `terraform.tfstate` shows up in `git status` | Add `*.tfstate*` to `.gitignore`. If it was ever committed, run `git rm --cached` on it and treat the database password as exposed: set a new `DB_PASSWORD` secret before the next deploy. |
