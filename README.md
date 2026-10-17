@@ -751,13 +751,15 @@ publishes to an SNS topic, which emails you (`deployment/terrafrom/alerts.tf`).
 | `BackendEventLoopLag` | Event loop p99 lag above 0.5 s for 5 minutes | warning |
 | `BackendCrashLooping` | More than 2 restarts in 30 minutes (a normal deploy is 1) | critical |
 
-**Turn on email:** add your address to `deployment/terrafrom/terraform.tfvars`
-and apply. Keeping it in the tfvars file (rather than an environment
-variable) means a local `apply` and the Deploy workflow agree, so neither one
-removes the other's subscription.
+**Turn on email:** the address is not stored in git (this repo is public).
+Add a repository variable **`ALERT_EMAIL`** under **Settings → Secrets and
+variables → Actions → Variables**; the Deploy workflow passes it to Terraform.
+When you run `apply` from your own machine, set it too, or that apply removes
+the subscription:
 
-```hcl
-alert_email = "you@example.com"
+```bash
+export TF_VAR_alert_email="you@example.com"
+./deployment/scripts/deploy.sh apply
 ```
 
 AWS sends one "Subscription Confirmation" email; click the link or nothing

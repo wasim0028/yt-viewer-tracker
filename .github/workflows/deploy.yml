@@ -59,6 +59,7 @@ jobs:
         env:
           AUTO_APPROVE: "1"
           TF_VAR_db_password: ${{ secrets.DB_PASSWORD }}
+          TF_VAR_alert_email: ${{ vars.ALERT_EMAIL }}   # repo variable; kept out of git because the repo is public
         run: ./deployment/scripts/deploy.sh apply
 
       - name: Cluster add-ons (CoreDNS, External Secrets, Load Balancer Controller, ArgoCD)
