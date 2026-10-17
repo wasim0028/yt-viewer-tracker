@@ -92,8 +92,9 @@ spec:
         fsGroup: 472
       containers:
         - name: grafana
-          # Public ECR mirror: avoids Docker Hub's anonymous pull limits.
-          image: public.ecr.aws/grafana/grafana:11.6.0
+          # Grafana's official image on Docker Hub. (An earlier public.ecr.aws
+          # path did not exist there: ImagePullBackOff.)
+          image: docker.io/grafana/grafana:11.6.0
           ports:
             - containerPort: 3000
           env:
