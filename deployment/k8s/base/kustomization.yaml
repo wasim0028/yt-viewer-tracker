@@ -25,10 +25,10 @@ resources:
 # "namespace" is set here (not at the top level) so the other namespaces in
 # this folder (external-secrets, aws-observability) are left alone.
 configMapGenerator:
-- name: backend-config
-  namespace: yt-viewer-tracker
-  envs:
+- envs:
   - backend-config.env
+  name: backend-config
+  namespace: yt-viewer-tracker
 
 # GitHub Actions rewrites these after each build, via:
 #   kustomize edit set image backend-image=<ecr-url>:<tag> frontend-image=<ecr-url>:<tag>
@@ -40,7 +40,7 @@ configMapGenerator:
 images:
 - name: backend-image
   newName: 326334468168.dkr.ecr.ap-south-1.amazonaws.com/yt-viewer-tracker-backend
-  newTag: 5bca9ca46a26
+  newTag: a2d45931989d
 - name: frontend-image
   newName: 326334468168.dkr.ecr.ap-south-1.amazonaws.com/yt-viewer-tracker-frontend
-  newTag: 5bca9ca46a26
+  newTag: a2d45931989d
