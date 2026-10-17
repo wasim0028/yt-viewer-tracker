@@ -40,7 +40,7 @@ configMapGenerator:
 images:
 - name: backend-image
   newName: 326334468168.dkr.ecr.ap-south-1.amazonaws.com/yt-viewer-tracker-backend
-  newTag: a2d45931989d
+  newTag: b54d03ad3bd4
 - name: frontend-image
   newName: 326334468168.dkr.ecr.ap-south-1.amazonaws.com/yt-viewer-tracker-frontend
-  newTag: a2d45931989d
+  newTag: b54d03ad3bd4
