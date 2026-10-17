@@ -14,7 +14,7 @@ data:
       "uid": "yt-backend",
       "title": "Viewer Watch - Backend",
       "schemaVersion": 39,
-      "version": 1,
+      "version": 2,
       "refresh": "30s",
       "time": {
         "from": "now-3h",
@@ -103,7 +103,24 @@ data:
           },
           "fieldConfig": {
             "defaults": {
-              "unit": "bytes"
+              "unit": "bytes",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "orange",
+                    "value": 157286400
+                  },
+                  {
+                    "color": "red",
+                    "value": 209715200
+                  }
+                ]
+              }
             },
             "overrides": []
           },
@@ -137,7 +154,16 @@ data:
           },
           "fieldConfig": {
             "defaults": {
-              "unit": "s"
+              "unit": "s",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              }
             },
             "overrides": []
           },
@@ -181,7 +207,21 @@ data:
               "refId": "A",
               "expr": "process_open_fds{job=\"backend\"}"
             }
-          ]
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          }
         },
         {
           "id": 5,
