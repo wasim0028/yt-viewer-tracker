@@ -39,7 +39,7 @@ IFS=$'\n\t'
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-TF_DIR="$REPO_ROOT/deployment/terrafrom"
+TF_DIR="$REPO_ROOT/deployment/terraform"
 K8S_DIR="$REPO_ROOT/deployment/k8s/base"
 APP_NAMESPACE="${APP_NAMESPACE:-yt-viewer-tracker}"
 APP_NAME="${APP_NAME:-yt-viewer-tracker}"

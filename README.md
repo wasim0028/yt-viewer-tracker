@@ -104,6 +104,11 @@ Everything below is from the real deployment on EKS Fargate (ap-south-1).
 
 ## Architecture (EKS deployment)
 
+![Viewer Watch architecture on AWS EKS Fargate: GitHub Actions, ECR, ArgoCD, Fargate pods, RDS, Secrets Manager, Prometheus, Grafana and SNS alerts](docs/architecture.png)
+
+<details>
+<summary>Text version of the same diagram</summary>
+
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
 │                                                                      │
@@ -137,6 +142,8 @@ Everything below is from the real deployment on EKS Fargate (ap-south-1).
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
+</details>
+
 ---
 
 ## Project structure
@@ -168,7 +175,7 @@ Everything below is from the real deployment on EKS Fargate (ap-south-1).
     ├── k8s/base/                  Kubernetes manifests (Kustomize)
     ├── scripts/deploy.sh          every deployment task, one entry point
     ├── scripts/bootstrap.sh       one-time: state bucket, lock table, CI role
-    └── terrafrom/                 Terraform
+    └── terraform/                 Terraform
         ├── main.tf                connects the modules
         ├── provider.tf            providers, S3 backend
         ├── variables.tf, terraform.tfvars, output.tf
@@ -423,9 +430,9 @@ bash deployment/scripts/bootstrap.sh
 
 Creates the S3 bucket and lock table that hold Terraform state, plus the role GitHub Actions uses (see [section 4](#4-one-click-deploy-and-cicd-github-actions)). Safe to re-run. Until it has run, `deploy.sh init` stops with `State bucket '...' not found`.
 
-> **Already have a local `terraform.tfstate` from an earlier deploy?** If that stack still exists in AWS, move its state into S3 before anything else: from `deployment/terrafrom` run `terraform init -migrate-state -reconfigure` with the same `-backend-config` values `deploy.sh init` uses (bucket `yt-viewer-tracker-tfstate-<account id>`, key `yt-viewer-tracker/terraform.tfstate`, your region, table `yt-viewer-tracker-tf-locks`, `encrypt=true`) and answer `yes`. Skipping this makes Terraform see an empty state and try to create everything again. If the old stack is already destroyed, just delete the local `terraform.tfstate*` files.
+> **Already have a local `terraform.tfstate` from an earlier deploy?** If that stack still exists in AWS, move its state into S3 before anything else: from `deployment/terraform` run `terraform init -migrate-state -reconfigure` with the same `-backend-config` values `deploy.sh init` uses (bucket `yt-viewer-tracker-tfstate-<account id>`, key `yt-viewer-tracker/terraform.tfstate`, your region, table `yt-viewer-tracker-tf-locks`, `encrypt=true`) and answer `yes`. Skipping this makes Terraform see an empty state and try to create everything again. If the old stack is already destroyed, just delete the local `terraform.tfstate*` files.
 
-**Step 4: Check the settings** in `deployment/terrafrom/terraform.tfvars`:
+**Step 4: Check the settings** in `deployment/terraform/terraform.tfvars`:
 
 | Setting | Value |
 |---|---|
@@ -726,7 +733,7 @@ keeps the old key until the pod restarts.
 
 ## Terraform reference
 
-`deployment/terrafrom/main.tf` connects the modules; the modules contain no
+`deployment/terraform/main.tf` connects the modules; the modules contain no
 app-specific values.
 
 | Module | Creates |
@@ -751,9 +758,9 @@ Fargate profiles exist for `kube-system`, `external-secrets`, `argocd`,
 `adot_collector_role_arn`, `lb_controller_role_arn`,
 `github_actions_role_arn`, `amp_workspace_endpoint`, `tf_state_bucket`.
 
-**Kubernetes version.** Set by `eks_cluster_version` in `deployment/terrafrom/variables.tf` (default `1.35`). EKS supports each version for about 14 months, then charges extra for extended support and eventually upgrades the cluster for you. Check the [EKS version calendar](https://docs.aws.amazon.com/eks/latest/userguide/kubernetes-versions.html) every few months. On a running cluster, upgrade one minor version at a time (change the variable, `deploy.sh apply`), then restart the Fargate pods so they pick up the new kubelet: `kubectl rollout restart deployment -n yt-viewer-tracker` (and the same for the other namespaces).
+**Kubernetes version.** Set by `eks_cluster_version` in `deployment/terraform/variables.tf` (default `1.35`). EKS supports each version for about 14 months, then charges extra for extended support and eventually upgrades the cluster for you. Check the [EKS version calendar](https://docs.aws.amazon.com/eks/latest/userguide/kubernetes-versions.html) every few months. On a running cluster, upgrade one minor version at a time (change the variable, `deploy.sh apply`), then restart the Fargate pods so they pick up the new kubelet: `kubectl rollout restart deployment -n yt-viewer-tracker` (and the same for the other namespaces).
 
-**Using the Terraform for another app:** copy `deployment/terrafrom`, change
+**Using the Terraform for another app:** copy `deployment/terraform`, change
 `local.name` in `main.tf` and the values in `terraform.tfvars`, give the VPC a
 different `cidr_block`, and set `create_github_oidc_provider = false` (an AWS
 account can have only one GitHub OIDC provider).
@@ -804,7 +811,7 @@ built-in Fluent Bit; metrics go through an ADOT Collector Deployment.
 ### Alerts (email)
 
 Prometheus alert rules run inside Amazon Managed Prometheus. Its Alertmanager
-publishes to an SNS topic, which emails you (`deployment/terrafrom/alerts.tf`).
+publishes to an SNS topic, which emails you (`deployment/terraform/alerts.tf`).
 
 | Alert | Fires when | Severity |
 |---|---|---|
@@ -828,7 +835,7 @@ AWS sends one "Subscription Confirmation" email; click the link or nothing
 is delivered. Check the email path end to end:
 
 ```bash
-aws sns publish --topic-arn "$(cd deployment/terrafrom && terraform output -raw alerts_topic_arn)" \
+aws sns publish --topic-arn "$(cd deployment/terraform && terraform output -raw alerts_topic_arn)" \
   --subject "Viewer Watch test" --message "If you can read this, alert email works."
 ```
 
@@ -990,8 +997,8 @@ fails while that snapshot name exists.
 
 ## License
 
-Add a `LICENSE` file to say how others may use this code. Until then, the
-default is "all rights reserved".
+[MIT](LICENSE). You may use, copy and change this code, including for
+commercial work, as long as you keep the copyright notice.
 
 ## Author
 
