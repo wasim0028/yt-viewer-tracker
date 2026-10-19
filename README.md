@@ -2,7 +2,10 @@
 
 # Viewer Watch
 
-**Live YouTube viewer tracking, channel vs. channel, in real time.**
+**A live dashboard that tracks concurrent viewers on two or more YouTube live streams over time, so you can compare channels head-to-head — the same idea as the internal "RBANGLA vs ABPANANDA" tool in the screenshot.
+
+Backend (/backend): Node.js + Express. Polls the YouTube Data API on a timer, stores every reading in PostgreSQL, and serves it over a small REST API.
+Frontend (/frontend): React + Vite. A Live Chart tab (auto-refreshing chart + reading log) and a History tab (pick any past date range).**
 
 ## About
 
