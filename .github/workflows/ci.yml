@@ -90,7 +90,7 @@ jobs:
     timeout-minutes: 10
     defaults:
       run:
-        working-directory: deployment/terrafrom
+        working-directory: deployment/terraform
     steps:
       - uses: actions/checkout@v4
       - uses: hashicorp/setup-terraform@v3
@@ -98,7 +98,7 @@ jobs:
           terraform_version: 1.9.8
           terraform_wrapper: false
       - name: Format (reported, not enforced)
-        run: terraform fmt -check -recursive -diff || echo "::warning::Run 'terraform fmt -recursive' in deployment/terrafrom"
+        run: terraform fmt -check -recursive -diff || echo "::warning::Run 'terraform fmt -recursive' in deployment/terraform"
       - name: Init without the S3 backend (no AWS access needed)
         run: terraform init -backend=false -input=false
       - name: Validate

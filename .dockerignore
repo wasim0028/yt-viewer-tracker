@@ -1,0 +1,15 @@
+# Docker build context is the repo root (see deployment/docker/Dockerfile.*).
+# Keep everything the images do not COPY out of the context.
+**/node_modules
+**/dist
+.git
+.github
+.env
+**/.env
+argocd
+docs
+banner.svg
+*.md
+deployment/terraform
+deployment/k8s
+deployment/scripts
